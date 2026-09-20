@@ -160,6 +160,12 @@
 - Verified the three size variants live for USDC: `/thumb/` is 25x25 (983 B), `/small/` is 50x50 (2.3 KB), and `/large/` is 250x250 (19 KB); a random sample of twelve `/large/` rewrites all returned HTTP 200.
 - Added a Workers-runtime test asserting that a CoinGecko `/thumb/` logo is stored as `/large/` and that a non-CoinGecko host containing `/thumb/` is left unchanged.
 
+## Landing page refresh
+
+- Reworded the landing page around the product description "chain-agnostic token search and bulk token pricing API" and updated its meta and Open Graph descriptions to match.
+- Refreshed the landing page docs against the implementation: added the `GET /v1` index to the endpoint table, documented that `q` is 2–100 characters and that `limit` defaults to 20, updated the sample search `imageUrl` to the `/large/` variant, corrected the stale-cache wording (a stale batch is cached only until a refresh is permitted, or served `no-store` when one already is), and noted that images use the largest available size.
+- Added the preferred `GET /v1/prices` and `GET /health` to the machine-readable `GET /v1` endpoint index, which previously listed only the uncached `POST` form.
+
 ## Backfill progress and source gating
 
 - Found in production that the market-cap backfill stalled: coverage sat at 4,406 of 26,485 assets across successive runs. Two distinct causes, both variations of the "permanently due" defect fixed earlier for chains.

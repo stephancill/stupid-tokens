@@ -85,7 +85,9 @@ app.get("/v1", (c) => {
       "GET /v1/chains",
       "GET /v1/search?q=usdc",
       "GET /v1/tokens/:chainId/:address",
+      "GET /v1/prices?tokens=1:native",
       "POST /v1/prices",
+      "GET /health",
     ],
     attribution: { name: "Data provided by CoinGecko", url: "https://www.coingecko.com/en/api" },
   });
