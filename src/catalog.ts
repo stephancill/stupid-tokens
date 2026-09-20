@@ -51,16 +51,21 @@ export function contentHash({ tokens }: { tokens: CatalogToken[] }) {
 
 const EVM_ADDRESS = /^0x[0-9a-f]{40}$/;
 
-// Token lists are community maintained and contain invalid or misplaced entries.
+// Token lists are community maintained and contain invalid, misplaced, or duplicated entries.
 function parseTokens({ chainId, list }: { chainId: number; list: TokenListToken[] }) {
-  const tokens: CatalogToken[] = [];
+  const byAddress = new Map<string, CatalogToken>();
   let discarded = 0;
   for (const token of list) {
     if (!EVM_ADDRESS.test(token.address) || token.chainId !== chainId || !token.name) {
       discarded++;
       continue;
     }
-    tokens.push({
+    // Duplicate deployments are a source data quality issue, not a reason to drop the chain.
+    if (byAddress.has(token.address)) {
+      discarded++;
+      continue;
+    }
+    byAddress.set(token.address, {
       chainId,
       address: token.address,
       assetId: null,
@@ -70,7 +75,7 @@ function parseTokens({ chainId, list }: { chainId: number; list: TokenListToken[
       imageUrl: token.logoURI ?? null,
     });
   }
-  return { tokens, discarded };
+  return { tokens: [...byAddress.values()], discarded };
 }
 
 export async function importChain({
