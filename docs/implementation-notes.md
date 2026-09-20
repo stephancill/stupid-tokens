@@ -2,10 +2,10 @@
 
 ## Initial implementation
 
-- Implemented Hono routes for chains, indexed token search, single-token metadata, and mixed-chain bulk USD prices (up to 100 inputs). Public routes are keyless and CORS-enabled; operator routes use a secret bearer token.
+- Implemented Hono routes for chains, indexed token search, single-token metadata, and mixed-chain bulk USD prices (50 inputs; originally 100). Public routes are keyless and CORS-enabled; operator routes use a secret bearer token.
 - Added D1 migrations for deployment metadata, shared source assets/quotes, chain state, and FTS5 trigram search. Search sorts all matching candidates by stored global market cap before limiting, with null caps last and deterministic chain/address ties. Two-character queries use indexed prefixes.
-- Added daily CoinGecko token-list synchronization, source ID mapping through `/coins/list` and `/asset_platforms`, change-only upserts, and post-import pruning. The initial registry covers eight EVM mainnets and their native currencies.
-- Added an operator-triggered, one-time market-cap/image seed. Subsequent market-cap updates accompany price demand. Source timestamp comparisons prevent older caps replacing newer values, including overlap with initial seeding.
+- Added token-list synchronization, change-only upserts, and post-import pruning. The original eight-chain allowlist and the `/coins/list` source-ID mapping were both later removed; see the automatic chain coverage and address-keyed pricing sections below.
+- Added an operator-triggered market-cap/image backfill. It is resumable rather than one-time, and market-cap updates also accompany price demand. Source timestamp comparisons prevent older caps replacing newer values.
 - Added a SQLite-backed Durable Object that coalesces concurrent misses, batches source IDs with both count and URL-size bounds, persists rolling 300-second per-asset attempt reservations before external I/O, enforces global provider budgets, and honors HTTP 429 backoff. Cached reads bypass the coordinator.
 - Price responses preserve input order and duplicates, deduplicate mapped deployments upstream, and expose source time, fetch time, and the next refresh time. Quotes older than 300 seconds at source return `stale` with a null price, even if the recent fetch remains within its cooldown. Failed attempts also retain the cooldown.
 - Added bounded internal edge caches. Whole POST responses are not cached; source age is evaluated when assembling each response. Missing tokens do not cause upstream calls.
@@ -14,16 +14,16 @@
 ## Verification
 
 - Type checking, linting, formatting, Workers-runtime integration tests, and a Wrangler deployment dry run pass.
-- Seventeen integration tests cover market-cap ordering, substring/address queries, import updates and pruning, imports spanning multiple chunks, a full 100-token price request, concurrent/cross-chain deduplication, persistence across forced object restarts, failed refresh cooldowns, budgets/backoff, stale prices, validation, native-token ingestion, initial market-cap seeding, automatic chain discovery, unavailable lists, and partial synchronization failures.
+- Twenty-four Workers-runtime integration tests cover market-cap ordering, substring/address queries, import updates and pruning, imports spanning multiple chunks, a maximum-size bulk price request, concurrent deduplication, persistence across forced object restarts, failed-refresh cooldowns, budgets and backoff, stale prices, validation, native-token ingestion, automatic chain discovery, unavailable and empty lists, partial synchronization failures, canonical GET caching and redirects, freshness-bounded `max-age`, and source isolation and merge behaviour.
 - Validated live CoinGecko platform/coin-ID responses and seven full token lists containing 18,328 entries. Live data exposed an empty symbol, so the schema preserves source-provided empty symbols; missing images remain nullable. The Gnosis token list was also retrieved and inspected.
-- Local D1 migrations apply successfully. Local HTTP checks confirm the root endpoint, CORS preflight, and explicit not-ready responses before catalog initialization.
-- Bundled Worker is approximately 874 KiB uncompressed / 146 KiB gzip.
+- Local D1 migrations apply successfully. Local HTTP checks confirm CORS preflight and explicit not-ready responses before catalog initialization. The root path now serves the landing page.
+- Bundled Worker is approximately 895 KiB uncompressed / 150 KiB gzip.
 
 ## Deployment state
 
 - Deployed as the `stupid-tokens` Worker on the custom domain `tokens.stupidtech.net`, backed by the `stupid-tokens` D1 database (`75a5c131-46ba-40e3-b126-1e663e220c1a`, WEUR). `wrangler.jsonc` contains the real account ID, database ID, and custom-domain route, so `bun run deploy` works from a checked-out copy.
 - `workers_dev` is disabled, so the Worker is reachable only via the custom domain.
-- Both migrations are applied remotely. `ADMIN_TOKEN` is set as a Worker secret and stored only in the ignored `.env.local` locally. No CoinGecko key is configured; the deployment runs keyless.
+- All four migrations (0001-0004) are applied remotely. `ADMIN_TOKEN` is set as a Worker secret and stored only in the ignored `.env.local` locally. No CoinGecko key is configured; the deployment runs keyless.
 - Runtime secrets are independent of deployments, so deploying from CI does not clear them.
 - The public GitHub repository is `stephancill/stupid-tokens`.
 - The repository is connected to the Worker through Workers Builds: production branch `main`, build command `bun install`, deploy command `bunx wrangler deploy`, non-production branch builds disabled. The non-production command remains the default `npx wrangler versions upload`, and preview URLs would not be generated anyway because the Worker uses Durable Objects. Pushes to `main` therefore deploy automatically.
@@ -41,7 +41,7 @@
 ## Catalog ingestion hardening
 
 - Found by running the sync against real data: the token-list CDN throttles concurrent and rapid requests, and some lists contain null versions, null chain IDs, non-EVM addresses, or entries for other chains.
-- Token lists are now fetched serially with a 250 ms gap instead of at 2–4 way concurrency, and lists that are still throttled after the bulk sweep get one serial retry pass. Throttled chains that fail again are reported and retried by the next sync.
+- Token lists are fetched serially with a 250 ms gap instead of at 2-4 way concurrency. An in-run retry pass was added and later removed; throttled chains are now retried by the next scheduled sync.
 - Malformed entries are discarded per entry and counted, instead of failing the whole chain. Only a list with no valid entries is reported empty.
 - Added `migrations/0002_chain_content_hash.sql` and a normalized content hash per chain. Unchanged lists are skipped, so repeat and nightly syncs only re-import genuine changes.
 - Catalog responses now include `pendingChains` (chains that produced neither an import, skip, nor failure) and imported entries include `discarded`. A sync that imports nothing because everything is unchanged reports `complete`, while a sync that imports nothing on a never-synchronized catalog reports `failed`.
@@ -51,7 +51,7 @@
 ## Catalog convergence and readiness
 
 - Found in production that no sync run had ever completed: a 275-chain sweep exceeds the invocation budget, so `catalog_synced_at` was never written and the API reported itself unready while holding 26k tokens. The import lock also persisted for an hour after a killed run, blocking retries.
-- Sync invocations are now bounded to a configurable budget (default eight minutes) and always write a report. Remaining chains are reported in `pending` with a `budgetExhausted` flag, so repeated calls converge.
+- Sync invocations are now bounded to a configurable budget (default three minutes) and always write a report. Remaining chains are reported in `pending` with a `budgetExhausted` flag, so repeated calls converge.
 - The import lock now expires after ten minutes instead of one hour, and a concurrent call returns HTTP 409 rather than a generic failure.
 - Readiness now tracks a usable catalog: any run that leaves at least one chain imported marks the catalog usable. Partial coverage is a warning surfaced through `catalogStatus` and `catalogPendingChains` rather than an outage. Previously any failure left health and all `/v1` routes returning 503.
 - Unavailable lists (HTTP 404/410) and valid empty lists are non-degrading skips, since many listed platforms publish no token list. Only failures or deferred chains make a usable catalog `partial`.
@@ -61,16 +61,16 @@
 
 - Replaced the initial eight-chain allowlist with automatic discovery from CoinGecko's numeric Chainlist/EIP-155 platform IDs. Platform IDs are URL-encoded without changing their case; the live source includes uppercase, underscore, and space-containing IDs, plus a non-EVM empty-ID placeholder.
 - Public token-list downloads now use each platform ID, including the canonical `ethereum` list URL. HTTP 404/410 and valid empty lists are reported as unavailable. Other HTTP, validation, and import errors are isolated and reported per chain; existing data is retained for failed/unavailable chains.
-- Native currency metadata is read dynamically from the public Chain ID registry. Unknown registry chains still get contract-token coverage; missing native metadata and missing CoinGecko native asset mappings are listed separately in the sync report.
-- Added four-way bounded import concurrency and ten-second token-list timeouts. Import results are returned and persisted as `catalog_sync_report`; partial/failed imports produce operator HTTP 503 responses, degraded health, and failed scheduled invocations while successful chain data remains queryable.
+- Native currency metadata is read dynamically from the public Chain ID registry. Unknown registry chains still get contract-token coverage, and missing native metadata is reported. The separate missing-native-asset-id list was removed when pricing moved to address-keyed sources.
+- Import results are returned and persisted as `catalog_sync_report`. Import concurrency was later reduced to serial fetching with a ten-second timeout per list. A partial run returns HTTP 200 and leaves health ready; only a run that imports nothing on a never-synchronized catalog returns HTTP 503.
 - Verified discovery against live source snapshots: 275 numeric EVM platform candidates, with native currency metadata available for 266. These are discovery counts, not a claim that every candidate has an available and valid token list. Retrieved the canonical Ethereum list and the Sonic/ENI lists to verify coverage beyond the former allowlist and handling of a missing native asset mapping.
 - Updated Workers-runtime tests to cover automatically discovered chains, URL encoding, null-ID exclusions, native decimals from the registry, missing native metadata/mappings, unavailable/empty lists, wrong-chain and malformed data, preservation of prior data, and degraded health.
-- No database migration is required; reports use the existing `app_state` table.
+- Reports use the `app_state` table. Later work did require migrations: 0002 (chain content hash), 0003 (GeckoTerminal network slug), and 0004 (chain check state).
 
 ## Provider-neutral responses
 
 - Removed `platformId` from `/v1/chains`; clients must use numeric `chainId` instead. The chain cache namespace was changed so cached responses cannot reintroduce the removed field.
-- Removed platform identifiers from synchronization reports. Imported/skipped/failed entries use `chainId`, and both missing-native arrays contain chain IDs. Source asset IDs remain internal to ingestion, storage, and price coordination.
+- Removed platform identifiers from synchronization reports. Imported/skipped/failed entries use `chainId`. Provider asset identifiers were subsequently removed from the design entirely when pricing moved to address-keyed sources.
 - Added an explicit report response schema and projected operator status fields. Detailed upstream errors are kept in Worker logs, with provider-neutral chain-based failure messages in responses.
 - Updated API documentation and existing runtime assertions for the response contract. No compatibility aliases are provided for removed provider-specific fields.
 
@@ -84,7 +84,7 @@
 - Added `migrations/0003_chain_geckoterminal_network.sql`. GeckoTerminal network slugs differ from CoinGecko platform ids (`eth` vs `ethereum`), so they are discovered from GeckoTerminal's `/networks` endpoint during sync rather than guessed. DefiLlama and DexScreener slugs are derived from the platform id with a small alias table.
 - Assets are keyed by the deployment itself (`chainId:address`), which reuses the existing quote, reservation, budget, and search-join machinery without a schema rewrite.
 - Fixed a related defect: the market-cap backfill passed an effectively infinite max age, which overflowed the SQL cutoff and selected no rows. The backfill now uses a 30-day window, so it is idempotent once complete while still filling newly added tokens.
-- Sync convergence fix: only chains whose `synced_at` is stale are fetched. Because `synced_at` is written only on success, failed or never-imported chains stay due and are retried, while fresh chains are skipped entirely. Previously every run re-fetched from the start and could never advance past the time budget. Reports now include `freshChains`, and `pending` counts only due chains.
+- Sync convergence, first attempt: only chains whose `synced_at` is stale are fetched, and reports gained `freshChains` with `pending` counting only due chains. This was incomplete because skipped chains never recorded a timestamp, so they stayed due forever; see the convergence fixes section below, which supersedes this.
 - Updated Workers-runtime tests to mock the three providers and to assert per-deployment market-cap ordering, and updated the API and architecture documentation.
 
 ## Provider fault isolation
@@ -109,10 +109,10 @@
 
 ## Convergence fixes
 
-- Diagnosed why the catalog could never stay complete: skipped chains recorded no timestamp, so the 59 chains whose lists are empty (plus any 404/410) were re-fetched on every single run forever; and the 24-hour metadata gate made all 176 imported chains due daily, so a single three-minute daily pass faced ~275 fetches.
+- Diagnosed why the catalog could never stay complete: skipped chains recorded no timestamp, so the 68 chains whose lists are empty or missing were re-fetched on every single run forever; and the 24-hour metadata gate made every imported chain due daily, so a single three-minute daily pass faced ~275 fetches.
 - Added `checked_at` and `sync_status` to `chains` (migration 0004). Successful imports record both; skipped or failed chains record the outcome without touching `synced_at`, so they no longer stay permanently due.
 - Retry cadences are now outcome-aware: a transient failure (throttling or a 5xx) is retried after 6 hours, a permanently unavailable list after 7 days, and successful metadata is refreshed after 7 days. Previously every non-success stayed due forever and every success expired daily.
-- Raised the metadata refresh gate from 24 hours to 7 days. Token lists change slowly, so the daily due set drops from ~275 chains to roughly 40-60.
+- Raised the metadata refresh gate from 24 hours to 7 days. Token lists change slowly, so the due set drops from the whole catalog to a small remainder.
 - Reduced token-list retry attempts from five to two and removed the in-run retry pass, since failures are now retried by the next scheduled run.
 - Changed the cron from daily to every six hours, and gated the upstream-heavy market-cap refresh to once per day so it does not multiply upstream load.
 - Added tests that a recently checked unavailable chain is not re-fetched, that it is re-checked once its gate lapses, and that a throttled chain retries sooner than a permanently unavailable one.
@@ -128,7 +128,7 @@
 - Responses carry `Cache-Control: public, max-age=N` where `N` is the shortest remaining freshness in the batch: the earlier of the next permitted refresh and the source timestamp plus 300 seconds, capped at 300. A lifetime of zero or less returns `no-store`. A stale batch is cached only until a refresh becomes possible. `stale-while-revalidate` is deliberately not used because it would serve data beyond the documented five-minute limit.
 - Refactored price assembly into a shared `loadPrices` used by both forms. The bulk path now uses a single batched D1 read instead of a per-token Cache API fan-out, and only tokens whose cooldown has lapsed reach the coordinator, removing up to 50 subrequests per request.
 - `POST` remains supported with identical semantics but is always `no-store`.
-- Workers Cache itself is not yet enabled; the response headers are already correct so enabling it is a configuration-only change.
+- Workers Cache itself is not yet enabled; the response headers are correct, so enabling it is a configuration-only change once the entrypoint headers above are live.
 
 ## Cache-Control for Workers Cache readiness
 
@@ -136,3 +136,11 @@
 - Search is now `public, max-age=60`, matching its internal edge-cache window. Token metadata is `public, max-age=60, stale-while-revalidate=3600`, which is safe because metadata only changes on catalog sync. A not-found token answer is equally stable and carries the same header.
 - `GET /v1` now states `public, max-age=3600` explicitly. It previously had no `Cache-Control` at all, which under Workers Cache would have been cached for two hours by RFC 9111 heuristic freshness rather than by intent.
 - Documented that migrations are not run by the Workers Builds deploy, so schema changes must be applied with `wrangler d1 migrations apply --remote` after deploying. Migration 0004 was found unapplied in production, which would have broken the next scheduled sync.
+
+## Verified in production
+
+- Convergence confirmed after applying migration 0004: one bounded pass imported 11 chains and cleared the backlog to `pendingChains: 0`, and subsequent passes report `complete` with `0` pending and `0` failures in about **1.5 seconds**, down from 180 seconds per pass. A steady-state sync now costs almost nothing.
+- Final chain accounting across 275 discovered platforms: 187 synchronized, 68 unavailable (re-checked after 7 days), 20 failed (retried after 6 hours), and **0 never seen**. Nothing is permanently due, which was the original defect.
+- Catalog holds 26,485 tokens across 187 chains.
+- Market-cap coverage is being filled by the resumable backfill, which is run repeatedly until it reports `complete: true`. GeckoTerminal throttles Cloudflare egress addresses, so caps largely come from DexScreener in production; running the backfill from a non-Cloudflare address lets GeckoTerminal contribute caps and images.
+- Price serving verified end to end against live sources: DefiLlama supplied prices, DexScreener supplied market caps, and native currencies priced correctly on five chains.
