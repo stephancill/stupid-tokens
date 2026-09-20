@@ -47,7 +47,9 @@ app.onError((error, c) => {
         ? "service_unavailable"
         : error.status === 401
           ? "unauthorized"
-          : "invalid_request";
+          : error.status === 409
+            ? "conflict"
+            : "invalid_request";
     return c.json({ error: { code, message: error.message } }, error.status);
   }
   console.error("request_failed", { path: c.req.path, message: error.message });
