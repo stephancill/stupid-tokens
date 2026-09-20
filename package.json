@@ -1,0 +1,35 @@
+{
+  "name": "stupid-tokens",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "db:migrate": "wrangler d1 migrations apply stupid-tokens --local",
+    "db:migrate:remote": "wrangler d1 migrations apply stupid-tokens --remote",
+    "types": "wrangler types",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint --deny-warnings",
+    "format": "oxfmt .",
+    "format:check": "oxfmt --check .",
+    "test": "vitest run",
+    "check": "bun run typecheck && bun run lint && bun run format:check && bun run test && bun run build"
+  },
+  "dependencies": {
+    "hono": "^4.13.8",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.1.11",
+    "@cloudflare/workers-types": "^5.20260911.1",
+    "@types/node": "^26.6.1",
+    "oxfmt": "^0.68.0",
+    "oxlint": "^1.83.0",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.0",
+    "wrangler": "^4.133.0"
+  },
+  "packageManager": "bun@1.3.14"
+}

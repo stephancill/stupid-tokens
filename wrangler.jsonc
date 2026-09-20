@@ -1,0 +1,29 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "stupid-tokens",
+  "main": "src/index.ts",
+  "account_id": "2e6717908caccc8ef5eebae01beea4aa",
+  "workers_dev": false,
+  "routes": [{ "pattern": "tokens.stupidtech.net", "custom_domain": true }],
+  "compatibility_date": "2026-09-20",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "stupid-tokens",
+      "database_id": "75a5c131-46ba-40e3-b126-1e663e220c1a",
+      "migrations_dir": "migrations",
+    },
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "PRICES", "class_name": "PriceCoordinator" }],
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["PriceCoordinator"] }],
+  "triggers": { "crons": ["0 3 * * *"] },
+  "vars": {
+    "COINGECKO_PLAN": "demo",
+    "PRICE_REQUESTS_PER_MINUTE": "15",
+    "PRICE_REQUESTS_PER_MONTH": "9000",
+  },
+  "observability": { "enabled": true, "head_sampling_rate": 0.01 },
+}
