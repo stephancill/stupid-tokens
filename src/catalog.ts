@@ -164,6 +164,41 @@ async function withImportLock<T>({
   }
 }
 
+// GeckoTerminal network slugs are an optional enrichment used for market caps. They are
+// cached because the keyless endpoint throttles, and a failure must never abort a sync.
+async function loadGeckoTerminalNetworks({ env }: { env: Env }) {
+  const CACHE_KEY = "gt_networks";
+  const CACHE_AT = "gt_networks_at";
+  const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+  const cached = await stateValue({ db: env.DB, key: CACHE_KEY });
+  const cachedAt = Number((await stateValue({ db: env.DB, key: CACHE_AT })) ?? 0);
+  if (cached && Date.now() - cachedAt < MAX_AGE_MS) {
+    return new Map(Object.entries(JSON.parse(cached) as Record<string, string>));
+  }
+  try {
+    const discovered = await geckoTerminalNetworks();
+    if (discovered.size) {
+      await setState({
+        db: env.DB,
+        key: CACHE_KEY,
+        value: JSON.stringify(Object.fromEntries(discovered)),
+      });
+      await setState({ db: env.DB, key: CACHE_AT, value: String(Date.now()) });
+      return discovered;
+    }
+  } catch (error) {
+    console.error("geckoterminal_networks_failed", {
+      message: error instanceof Error ? error.message : "Unknown upstream failure",
+    });
+  }
+  // Fall back to the last known mapping, then to previously stored per-chain values.
+  if (cached) return new Map(Object.entries(JSON.parse(cached) as Record<string, string>));
+  const stored = await env.DB.prepare(
+    "SELECT platform_id, gt_network FROM chains WHERE gt_network IS NOT NULL",
+  ).all<{ platform_id: string; gt_network: string }>();
+  return new Map(stored.results.map((row) => [row.platform_id, row.gt_network]));
+}
+
 export async function syncCatalog({
   env,
   budgetMs = 3 * 60_000,
@@ -187,7 +222,7 @@ export async function syncCatalog({
         const [platforms, registry, networks] = await Promise.all([
           apiJson({ env, path: "/asset_platforms" }).then((data) => platformsSchema.parse(data)),
           fetchJson({ url: CHAIN_REGISTRY_URL }).then((data) => chainRegistrySchema.parse(data)),
-          geckoTerminalNetworks(),
+          loadGeckoTerminalNetworks({ env }),
         ]);
         const chains = discoverChains({ platforms, registry });
         if (!chains.length) throw new Error("CoinGecko returned no EVM platforms");
