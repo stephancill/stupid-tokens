@@ -21,12 +21,13 @@
 
 ## Deployment state
 
-- Implementation is local; no production resources have been provisioned or deployed.
-- `wrangler.jsonc` contains a placeholder D1 database ID. Deployment requires a real database, a CoinGecko key, an admin secret, migrations, catalog synchronization, and the initial market-cap seed. See `docs/getting-started.md`.
-- Default upstream mode is keyless, with 15 price attempts/minute and 9,000/month. Catalog/seed calls are additional. A CoinGecko key is optional and only raises limits. Metadata import uses the Workers Paid runtime allowances.
-- Deployed as the `stupid-tokens` Worker on the custom domain `tokens.stupidtech.net`, backed by the `stupid-tokens` D1 database. `wrangler.jsonc` contains the real account ID, database ID, and custom-domain route.
+- Deployed as the `stupid-tokens` Worker on the custom domain `tokens.stupidtech.net`, backed by the `stupid-tokens` D1 database (`75a5c131-46ba-40e3-b126-1e663e220c1a`, WEUR). `wrangler.jsonc` contains the real account ID, database ID, and custom-domain route, so `bun run deploy` works from a checked-out copy.
 - `workers_dev` is disabled, so the Worker is reachable only via the custom domain.
-- The GitHub repository is `stephancill/stupid-tokens`. Automatic deployment on push to `main` requires the Workers Builds GitHub App connection, which needs the dashboard or a user-scoped API token with the Workers Builds Configuration permission.
+- Both migrations are applied remotely. `ADMIN_TOKEN` is set as a Worker secret and stored only in the ignored `.env.local` locally. No CoinGecko key is configured; the deployment runs keyless.
+- Runtime secrets are independent of deployments, so deploying from CI does not clear them.
+- The public GitHub repository is `stephancill/stupid-tokens`.
+- The repository is connected to the Worker through Workers Builds: production branch `main`, build command `bun install`, deploy command `bunx wrangler deploy`, non-production branch builds disabled. The non-production command remains the default `npx wrangler versions upload`, and preview URLs would not be generated anyway because the Worker uses Durable Objects. Pushes to `main` therefore deploy automatically.
+- Workers Builds uses a pre-existing build token. The build configuration lives in Cloudflare, not in the repository, so it is not reproducible from source; recreating it requires the dashboard or a user-scoped API token with the Workers Builds Configuration permission.
 
 ## Keyless upstream default
 
