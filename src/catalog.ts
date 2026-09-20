@@ -5,7 +5,7 @@ import {
   dexscreenerQuotes,
   geckoTerminalNetworks,
   geckoTerminalQuotes,
-  mergeQuotes,
+  trySources,
 } from "./providers";
 import { HTTPException } from "hono/http-exception";
 import type { Env } from "./types";
@@ -421,10 +421,10 @@ async function marketCapBatch({ env, ids, now }: { env: Env; ids: string[]; now:
     db: env.DB,
     chainIds: [...new Set(tokens.map((token) => token.chainId))],
   });
-  const merged = mergeQuotes({
-    sources: [
-      await geckoTerminalQuotes({ tokens, chains: chainSources }),
-      await dexscreenerQuotes({ tokens, chains: chainSources }),
+  const merged = await trySources({
+    loaders: [
+      { name: "geckoterminal", load: () => geckoTerminalQuotes({ tokens, chains: chainSources }) },
+      { name: "dexscreener", load: () => dexscreenerQuotes({ tokens, chains: chainSources }) },
     ],
   });
   const payload = [...merged].flatMap(([id, quote]) =>

@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { z } from "zod";
 import { getChainSources, getQuotes, writeQuotes } from "./database";
-import { defillamaQuotes, dexscreenerQuotes, geckoTerminalQuotes, mergeQuotes } from "./providers";
+import { defillamaQuotes, dexscreenerQuotes, geckoTerminalQuotes, trySources } from "./providers";
 import { refreshIdsSchema } from "./validation";
 import { REFRESH_MS, type Env, type QuoteRow } from "./types";
 
@@ -193,11 +193,14 @@ export class PriceCoordinator extends DurableObject<Env> {
         chainIds: [...new Set(tokens.map((token) => token.chainId))],
       });
       const fetchedAt = Date.now();
-      const merged = mergeQuotes({
-        sources: [
-          await defillamaQuotes({ tokens, chains: chainSources }),
-          await geckoTerminalQuotes({ tokens, chains: chainSources }),
-          await dexscreenerQuotes({ tokens, chains: chainSources }),
+      const merged = await trySources({
+        loaders: [
+          { name: "defillama", load: () => defillamaQuotes({ tokens, chains: chainSources }) },
+          {
+            name: "geckoterminal",
+            load: () => geckoTerminalQuotes({ tokens, chains: chainSources }),
+          },
+          { name: "dexscreener", load: () => dexscreenerQuotes({ tokens, chains: chainSources }) },
         ],
       });
       quotes = reserved.map((row): QuoteRow => {

@@ -290,6 +290,33 @@ export async function geckoTerminalNetworks() {
   return mapping;
 }
 
+// A source that is throttled or broken must not discard results from the others, so each
+// is isolated. Only if every source fails does the refresh count as an upstream failure.
+export async function trySources({
+  loaders,
+}: {
+  loaders: { name: ProviderName; load: () => Promise<Map<string, ProviderQuote>> }[];
+}) {
+  const sources: Map<string, ProviderQuote>[] = [];
+  let lastError: unknown = null;
+  let failures = 0;
+  for (const loader of loaders) {
+    try {
+      sources.push(await loader.load());
+    } catch (error) {
+      failures++;
+      lastError = error;
+      console.error("price_source_failed", {
+        source: loader.name,
+        message: error instanceof Error ? error.message : "Unknown upstream failure",
+      });
+      sources.push(new Map());
+    }
+  }
+  if (failures === loaders.length && lastError) throw lastError;
+  return mergeQuotes({ sources });
+}
+
 // Merge sources in priority order: the first provider with a usable value wins per field.
 export function mergeQuotes({ sources }: { sources: Map<string, ProviderQuote>[] }) {
   const merged = new Map<string, ProviderQuote>();

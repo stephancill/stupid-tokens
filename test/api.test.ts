@@ -364,13 +364,17 @@ describe("bulk prices and global refresh coordination", () => {
       (await stub.getPrices({ ids: ["1:0x0000000000000000000000000000000000000001"] }))[0]
         ?.price_status,
     ).toBe("rate_limited");
-    // One logical attempt, retried once for transient throttling.
+    // The primary source retries once before the refresh is considered failed.
     expect(llamaCalls(upstream)).toBe(2);
+    // Every source is still attempted so one throttled provider cannot discard the others.
+    const afterFirst = calls;
+    expect(afterFirst).toBeGreaterThan(2);
     expect(
       (await stub.getPrices({ ids: ["1:0x0000000000000000000000000000000000000002"] }))[0]
         ?.price_status,
     ).toBe("rate_limited");
-    expect(calls).toBe(2);
+    // The global backoff prevents any further upstream calls for other assets.
+    expect(calls).toBe(afterFirst);
   });
 
   it("distinguishes stale source timestamps and unknown tokens without making unknown-token calls", async () => {

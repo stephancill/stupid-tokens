@@ -86,3 +86,9 @@
 - Fixed a related defect: the market-cap backfill passed an effectively infinite max age, which overflowed the SQL cutoff and selected no rows. The backfill now uses a 30-day window, so it is idempotent once complete while still filling newly added tokens.
 - Sync convergence fix: only chains whose `synced_at` is stale are fetched. Because `synced_at` is written only on success, failed or never-imported chains stay due and are retried, while fresh chains are skipped entirely. Previously every run re-fetched from the start and could never advance past the time budget. Reports now include `freshChains`, and `pending` counts only due chains.
 - Updated Workers-runtime tests to mock the three providers and to assert per-deployment market-cap ordering, and updated the API and architecture documentation.
+
+## Provider fault isolation
+
+- Found by probing from Cloudflare's network that GeckoTerminal returns HTTP 429 to Workers while DefiLlama and DexScreener return 200. Because the three sources were awaited in a single array literal, a GeckoTerminal 429 aborted the whole refresh and discarded the successful DefiLlama price, so no price was ever served.
+- Added `trySources`, which isolates each provider: a throttled or broken source contributes nothing and is logged, while the remaining sources still produce a result. A refresh is only treated as an upstream failure when every source fails, which preserves the existing backoff behaviour.
+- Applied the same isolation to the market-cap path, so caps can still come from DexScreener when GeckoTerminal is throttled.
