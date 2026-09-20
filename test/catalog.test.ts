@@ -306,10 +306,34 @@ it("skips unchanged lists on repeat sync and reports pending chains", async () =
   const second = await syncCatalog({ env });
   expect(second.chains).toBe(0);
   expect(second.tokens).toBe(0);
-  // Recently synced chains are not fetched at all; only due chains are retried.
-  expect(second.skipped).toEqual([{ chainId: 147, reason: "token_list_http_404" }]);
-  expect(second.freshChains).toBe(1);
+  // Both the freshly synced chain and the recently checked 404 chain are skipped entirely, so a
+  // permanently unavailable list no longer consumes budget on every run.
+  expect(second.skipped).toEqual([]);
+  expect(second.freshChains).toBe(2);
   expect(second.status).toBe("complete");
+  // Once the retry gate lapses the unavailable chain is checked again.
+  const third = await syncCatalog({ env, unavailableMs: 0 });
+  expect(third.skipped).toEqual([{ chainId: 147, reason: "token_list_http_404" }]);
+});
+
+it("retries a throttled chain sooner than a permanently unavailable one", async () => {
+  upstream({
+    platforms: [platform({ id: "throttled", chainId: 146 })],
+    responses: { throttled: () => new Response(null, { status: 429 }) },
+  });
+  const first = await syncCatalog({ env });
+  expect(first.failures.map((failure) => failure.chainId)).toEqual([146]);
+  // A transient failure is retried on the next run.
+  const second = await syncCatalog({ env, retryMs: 0 });
+  expect(second.failures.map((failure) => failure.chainId)).toEqual([146]);
+  // A permanent unavailability is not.
+  upstream({
+    platforms: [platform({ id: "gone", chainId: 147 })],
+    responses: { gone: () => new Response(null, { status: 404 }) },
+  });
+  await syncCatalog({ env });
+  const after = await syncCatalog({ env });
+  expect(after.skipped).toEqual([]);
 });
 
 it("fails explicitly when no lists are available and rejects ambiguous chain IDs", async () => {

@@ -20,7 +20,7 @@
     "bindings": [{ "name": "PRICES", "class_name": "PriceCoordinator" }],
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["PriceCoordinator"] }],
-  "triggers": { "crons": ["0 3 * * *"] },
+  "triggers": { "crons": ["0 */6 * * *"] },
   "vars": {
     "COINGECKO_PLAN": "demo",
     "PRICE_REQUESTS_PER_MINUTE": "15",

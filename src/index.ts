@@ -307,12 +307,23 @@ export default {
     try {
       const report = await syncCatalog({ env });
       console.log("catalog_synced", report);
-      const caps = await refreshMarketCaps({
-        env,
-        maxAgeMs: 7 * 24 * 60 * 60 * 1000,
-        deadline: Date.now() + 10 * 60_000,
-      });
-      console.log("market_caps_refreshed", caps);
+      // Market caps move slowly and are the most upstream-hungry step, so refresh once a day.
+      const capsAt = Number(
+        (await stateValue({ db: env.DB, key: "market_caps_refreshed_at" })) ?? 0,
+      );
+      if (Date.now() - capsAt > 20 * 60 * 60 * 1000) {
+        const caps = await refreshMarketCaps({
+          env,
+          maxAgeMs: 7 * 24 * 60 * 60 * 1000,
+          deadline: Date.now() + 10 * 60_000,
+        });
+        console.log("market_caps_refreshed", caps);
+        await setState({
+          db: env.DB,
+          key: "market_caps_refreshed_at",
+          value: String(Date.now()),
+        });
+      }
       if (report.status !== "complete")
         throw new Error(
           `Catalog sync ${report.status}: ${report.failures.length} chain imports failed`,

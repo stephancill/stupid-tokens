@@ -131,9 +131,32 @@ export async function importChain({
       )
       .bind(chain.id, JSON.stringify(tokens.map((token) => token.address))),
     db
-      .prepare("UPDATE chains SET synced_at = ?, content_hash = ? WHERE id = ?")
-      .bind(now, hash ?? null, chain.id),
+      .prepare(
+        "UPDATE chains SET synced_at = ?, checked_at = ?, sync_status = 'ok', content_hash = ? WHERE id = ?",
+      )
+      .bind(now, now, hash ?? null, chain.id),
   ]);
+}
+
+// Records that a chain was examined even though nothing was imported, so it is not retried on
+// every subsequent sync.
+export async function markChainChecked({
+  db,
+  chain,
+  status,
+  now,
+}: {
+  db: D1Database;
+  chain: { id: number; name: string; platform: string };
+  status: "unavailable" | "failed";
+  now: number;
+}) {
+  await db
+    .prepare(`INSERT INTO chains(id, name, platform_id, checked_at, sync_status) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET checked_at = excluded.checked_at, sync_status = excluded.sync_status,
+        name = excluded.name, platform_id = excluded.platform_id`)
+    .bind(chain.id, chain.name, chain.platform, now, status)
+    .run();
 }
 
 async function withImportLock<T>({
@@ -202,11 +225,15 @@ async function loadGeckoTerminalNetworks({ env }: { env: Env }) {
 export async function syncCatalog({
   env,
   budgetMs = 3 * 60_000,
-  maxAgeMs = 24 * 60 * 60 * 1000,
+  maxAgeMs = 7 * 24 * 60 * 60 * 1000,
+  retryMs = 6 * 60 * 60 * 1000,
+  unavailableMs = 7 * 24 * 60 * 60 * 1000,
 }: {
   env: Env;
   budgetMs?: number;
   maxAgeMs?: number;
+  retryMs?: number;
+  unavailableMs?: number;
 }) {
   return withImportLock({
     env,
@@ -230,12 +257,15 @@ export async function syncCatalog({
         const skipped: { chainId: number; reason: string }[] = [];
         const failures: { chainId: number; message: string }[] = [];
         const missingNativeMetadata: number[] = [];
-        const retryable: typeof chains = [];
         const syncState = new Map(
           (
-            await env.DB.prepare("SELECT id, synced_at, content_hash FROM chains").all<{
+            await env.DB.prepare(
+              "SELECT id, synced_at, checked_at, sync_status, content_hash FROM chains",
+            ).all<{
               id: number;
               synced_at: number | null;
+              checked_at: number | null;
+              sync_status: string | null;
               content_hash: string | null;
             }>()
           ).results.map((row) => [row.id, row]),
@@ -248,31 +278,32 @@ export async function syncCatalog({
         const alreadySynced = [...syncState.values()].filter(
           (row) => row.synced_at !== null,
         ).length;
-        // Only fetch lists that are due. Successful imports record `synced_at`, so chains that
-        // failed or were never imported stay due and are retried, while fresh chains are skipped
-        // entirely. This keeps bounded runs convergent instead of re-fetching from the start.
-        const staleBefore = Date.now() - maxAgeMs;
-        const due = chains.filter(
-          (chain) => (syncState.get(chain.id)?.synced_at ?? 0) < staleBefore,
-        );
+        // Only fetch lists that are due. Successful imports record `synced_at`; skipped or failed
+        // chains record `checked_at`, so they are retried later rather than on every run.
+        // Metadata changes slowly, so the refresh gate is much longer than the retry gate.
+        const refreshBefore = Date.now() - maxAgeMs;
+        const retryBefore = Date.now() - retryMs;
+        const unavailableBefore = Date.now() - unavailableMs;
+        const due = chains.filter((chain) => {
+          const state = syncState.get(chain.id);
+          if ((state?.synced_at ?? 0) >= refreshBefore) return false;
+          // A transient failure is retried soon; a list that publishes nothing is not.
+          const checkedBefore = state?.sync_status === "failed" ? retryBefore : unavailableBefore;
+          return (state?.checked_at ?? 0) < checkedBefore;
+        });
         const freshCount = chains.length - due.length;
-        async function importOneChain({
-          chain,
-          retry = false,
-        }: {
-          chain: (typeof chains)[number];
-          retry?: boolean;
-        }) {
+        async function importOneChain({ chain }: { chain: (typeof chains)[number] }) {
           const identity = { chainId: chain.id };
           try {
             const list = tokenListSchema.parse(
               await fetchJson({
                 url: `https://tokens.coingecko.com/${encodeURIComponent(chain.platform)}/all.json`,
                 timeoutMs: 10_000,
-                attempts: 5,
+                attempts: 2,
               }),
             );
             if (!list.tokens.length) {
+              await markChainChecked({ db: env.DB, chain, status: "unavailable", now: Date.now() });
               skipped.push({ ...identity, reason: "empty_token_list" });
               return;
             }
@@ -311,16 +342,16 @@ export async function syncCatalog({
             const status =
               error instanceof Error && "upstreamStatus" in error ? error.upstreamStatus : null;
             if (status === 404 || status === 410) {
+              await markChainChecked({ db: env.DB, chain, status: "unavailable", now: Date.now() });
               skipped.push({ ...identity, reason: `token_list_http_${status}` });
             } else if (status === 429 || status === 403) {
-              if (retry) {
-                const message = "Throttled by the token-list CDN on retry";
-                failures.push({ ...identity, message });
-                console.error("chain_import_throttled", { ...identity, message });
-              } else {
-                retryable.push(chain);
-              }
+              // Throttling is transient, so retry on the next sync rather than the next week.
+              await markChainChecked({ db: env.DB, chain, status: "failed", now: Date.now() });
+              const message = "Throttled by the token-list CDN";
+              failures.push({ ...identity, message });
+              console.error("chain_import_throttled", { ...identity, message });
             } else {
+              await markChainChecked({ db: env.DB, chain, status: "failed", now: Date.now() });
               const message =
                 error instanceof Error ? error.message.slice(0, 2000) : "Unknown import error";
               failures.push({ ...identity, message });
@@ -348,17 +379,7 @@ export async function syncCatalog({
           }
         }
         await importNextChains();
-        if (retryable.length && !budgetExhausted) {
-          console.log("catalog_retrying_throttled_chains", { chains: retryable.length });
-          for (const chain of retryable.sort((a, b) => a.id - b.id)) {
-            if (Date.now() > deadline) {
-              budgetExhausted = true;
-              break;
-            }
-            await new Promise((resolve) => setTimeout(resolve, 1000));
-            await importOneChain({ chain, retry: true });
-          }
-        }
+
         const finishedAt = new Date().toISOString();
         const pending = due
           .filter(

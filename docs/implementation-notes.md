@@ -106,3 +106,13 @@
 - Styling follows the shared Stupid minimal aesthetic: system-ui type, a 46rem column, light-gray code blocks, no framework or build step. The page carries a full set of Open Graph tags and a lowercased `stupid tokens` title.
 - Generated `favicon.png` (32px), `apple-touch-icon.png` (180px), and `og.png` (1200x630) from the supplied mark with ImageMagick, so the tab icon and link preview match.
 - Documented endpoint behaviour on the page: identity as `chainId` plus `address`, `native` for native currencies, market-cap-ordered search, the per-item price statuses, the five-minute refresh cooldown, request limits, and the upstream sources.
+
+## Convergence fixes
+
+- Diagnosed why the catalog could never stay complete: skipped chains recorded no timestamp, so the 59 chains whose lists are empty (plus any 404/410) were re-fetched on every single run forever; and the 24-hour metadata gate made all 176 imported chains due daily, so a single three-minute daily pass faced ~275 fetches.
+- Added `checked_at` and `sync_status` to `chains` (migration 0004). Successful imports record both; skipped or failed chains record the outcome without touching `synced_at`, so they no longer stay permanently due.
+- Retry cadences are now outcome-aware: a transient failure (throttling or a 5xx) is retried after 6 hours, a permanently unavailable list after 7 days, and successful metadata is refreshed after 7 days. Previously every non-success stayed due forever and every success expired daily.
+- Raised the metadata refresh gate from 24 hours to 7 days. Token lists change slowly, so the daily due set drops from ~275 chains to roughly 40-60.
+- Reduced token-list retry attempts from five to two and removed the in-run retry pass, since failures are now retried by the next scheduled run.
+- Changed the cron from daily to every six hours, and gated the upstream-heavy market-cap refresh to once per day so it does not multiply upstream load.
+- Added tests that a recently checked unavailable chain is not re-fetched, that it is re-checked once its gate lapses, and that a throttled chain retries sooner than a permanently unavailable one.
