@@ -116,3 +116,7 @@
 - Reduced token-list retry attempts from five to two and removed the in-run retry pass, since failures are now retried by the next scheduled run.
 - Changed the cron from daily to every six hours, and gated the upstream-heavy market-cap refresh to once per day so it does not multiply upstream load.
 - Added tests that a recently checked unavailable chain is not re-fetched, that it is re-checked once its gate lapses, and that a throttled chain retries sooner than a permanently unavailable one.
+
+## Bulk request cap
+
+- Reduced the bulk price request limit from 100 to 50 tokens, matching the intended usage and keeping a single request well inside Workers subrequest limits. Updated the landing page, API documentation, and the validation test.

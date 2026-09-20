@@ -56,7 +56,7 @@ Values above are illustrative. Image URLs and market caps may be null. A source-
 
 ## POST /v1/prices
 
-Requires `Content-Type: application/json`. Accepts 1–100 tokens across any supported chains, with a maximum body size of 32 KiB.
+Requires `Content-Type: application/json`. Accepts 1–50 tokens across any supported chains, with a maximum body size of 32 KiB.
 
 ```sh
 curl 'http://localhost:8787/v1/prices' \

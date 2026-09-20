@@ -428,7 +428,7 @@ describe("bulk prices and global refresh coordination", () => {
     expect(
       (
         await prices({
-          tokens: Array.from({ length: 101 }, () => ({ chainId: 1, address: "native" })),
+          tokens: Array.from({ length: 51 }, () => ({ chainId: 1, address: "native" })),
         })
       ).status,
     ).toBe(400);

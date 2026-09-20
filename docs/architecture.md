@@ -2,7 +2,7 @@
 
 ## Product contract
 
-Public, keyless EVM token metadata, name/symbol/address search ordered by market cap, and USD bulk pricing. A request accepts up to 100 mixed-chain tokens. Native currencies use `native` as the address. Unknown tokens and unavailable prices have explicit per-item statuses.
+Public, keyless EVM token metadata, name/symbol/address search ordered by market cap, and USD bulk pricing. A request accepts up to 50 mixed-chain tokens. Native currencies use `native` as the address. Unknown tokens and unavailable prices have explicit per-item statuses.
 
 Token lists provide deployment metadata, including decimals and nullable images. Prices and market caps come from address-keyed providers, so identity is always `chainId + address` and no provider coin-ID mapping is required.
 

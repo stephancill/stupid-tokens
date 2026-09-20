@@ -9,7 +9,7 @@ export const tokenIdSchema = z.strictObject({
   address: z.union([evmAddress, z.literal("native")]),
 });
 export const priceRequestSchema = z.strictObject({
-  tokens: z.array(tokenIdSchema).min(1).max(100),
+  tokens: z.array(tokenIdSchema).min(1).max(50),
 });
 export const searchSchema = z.strictObject({
   q: z.string().trim().min(2).max(100),
