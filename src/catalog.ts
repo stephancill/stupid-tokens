@@ -152,7 +152,7 @@ async function withImportLock<T>({
   }
 }
 
-export async function syncCatalog({ env, budgetMs = 8 * 60_000 }: { env: Env; budgetMs?: number }) {
+export async function syncCatalog({ env, budgetMs = 3 * 60_000 }: { env: Env; budgetMs?: number }) {
   return withImportLock({
     env,
     key: "catalog_lock",

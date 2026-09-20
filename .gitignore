@@ -9,3 +9,5 @@ third-party/
 worker-configuration.d.ts
 
 wrangler.debug.jsonc
+
+wrangler.bootstrap.jsonc
