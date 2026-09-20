@@ -5,7 +5,7 @@ import { bodyLimit } from "hono/body-limit";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { cacheKey, cached } from "./cache";
-import { seedMarketCaps, syncCatalog } from "./catalog";
+import { refreshMarketCaps, seedMarketCaps, syncCatalog } from "./catalog";
 import { getQuotes, getTokens, searchTokens, setState, stateValue } from "./database";
 import { priceResponse, tokenKey, tokenResponse, type Env, type QuoteRow } from "./types";
 import { catalogReportSchema, priceRequestSchema, searchSchema, tokenIdSchema } from "./validation";
@@ -295,6 +295,12 @@ export default {
     try {
       const report = await syncCatalog({ env });
       console.log("catalog_synced", report);
+      const caps = await refreshMarketCaps({
+        env,
+        maxAgeMs: 7 * 24 * 60 * 60 * 1000,
+        deadline: Date.now() + 10 * 60_000,
+      });
+      console.log("market_caps_refreshed", caps);
       if (report.status !== "complete")
         throw new Error(
           `Catalog sync ${report.status}: ${report.failures.length} chain imports failed`,

@@ -10,7 +10,7 @@ All external identities use numeric chain IDs and chain/address token pairs. Pro
 
 Prices refresh only on demand. A source asset gets at most one upstream attempt in a rolling 300-second interval, including failed attempts. The interval starts immediately before dispatch, and persists across coordinator eviction. Price age uses the source timestamp; cache lifetime uses the attempt timestamp. The API exposes both and reports stale source prices explicitly rather than implying that a recent fetch guarantees recent source data.
 
-Search uses the latest stored market caps, with null values last and chain/address tie-breakers. Initial market-cap seeding is a separate operator action; subsequent updates come from demand-driven price requests. Less-used assets may have old market caps. The displayed value is the value used for sorting.
+Search uses the latest stored market caps, with null values last and chain/address tie-breakers. Market caps are seeded by an operator backfill, refreshed alongside demand-driven price requests, and refreshed by the nightly job for assets whose caps are missing or older than seven days. Less-used assets may have old market caps. The displayed value is the value used for sorting. A backfill that runs out of time leaves unseeded assets for the next run and is not recorded as complete.
 
 ## Runtime
 

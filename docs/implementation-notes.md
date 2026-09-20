@@ -45,6 +45,7 @@
 - Added `migrations/0002_chain_content_hash.sql` and a normalized content hash per chain. Unchanged lists are skipped, so repeat and nightly syncs only re-import genuine changes.
 - Catalog responses now include `pendingChains` (chains that produced neither an import, skip, nor failure) and imported entries include `discarded`. A sync that imports nothing because everything is unchanged reports `complete`, while a sync that imports nothing on a never-synchronized catalog reports `failed`.
 - Removed the unused `list` field from chain discovery; token lists are always addressed by CoinGecko platform ID.
+- Reworked market-cap seeding into a resumable backfill shared with the nightly job. A backfill that exhausts its time budget reports `complete: false` with `remaining` and is not recorded as complete, so it can be re-run; previously an incomplete seed was permanently marked done. The nightly job now also refreshes caps that are missing or older than seven days, so newly added tokens get caps without operator action.
 
 ## Automatic chain coverage
 

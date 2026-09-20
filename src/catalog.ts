@@ -332,59 +332,108 @@ export async function syncCatalog({ env }: { env: Env }) {
   });
 }
 
+async function marketCapBatch({ env, ids, now }: { env: Env; ids: string[]; now: number }) {
+  const batch = priceBatch({ ids });
+  if (!batch.length) return 0;
+  const markets = marketsSchema.parse(
+    await apiJson({
+      env,
+      path: "/coins/markets",
+      query: {
+        ids: batch.join(","),
+        vs_currency: "usd",
+        per_page: "250",
+        page: "1",
+        sparkline: "false",
+      },
+    }),
+  );
+  const payload = markets.map((market) => ({
+    id: market.id,
+    image: market.image ?? null,
+    cap: market.market_cap ?? null,
+    updatedAt: market.last_updated ? Math.min(Date.parse(market.last_updated), now) : now,
+  }));
+  if (payload.length) {
+    await env.DB.prepare(`UPDATE assets SET
+      image_url = COALESCE(json_extract(m.value, '$.image'), assets.image_url),
+      market_cap_usd = CASE WHEN COALESCE(assets.market_cap_updated_at, 0) <= json_extract(m.value, '$.updatedAt')
+        THEN json_extract(m.value, '$.cap') ELSE assets.market_cap_usd END,
+      market_cap_updated_at = MAX(COALESCE(assets.market_cap_updated_at, 0), json_extract(m.value, '$.updatedAt'))
+      FROM json_each(?) m WHERE assets.id = json_extract(m.value, '$.id')`)
+      .bind(JSON.stringify(payload))
+      .run();
+  }
+  return payload.length;
+}
+
+// Caps keep search ordering meaningful, so they are refreshed on demand, by the nightly
+// job for stale/missing values, and by the one-time backfill below.
+export async function refreshMarketCaps({
+  env,
+  maxAgeMs,
+  deadline,
+}: {
+  env: Env;
+  maxAgeMs: number;
+  deadline: number;
+}) {
+  const ids = (
+    await env.DB.prepare(`SELECT DISTINCT t.asset_id AS id FROM tokens t
+      JOIN assets a ON a.id = t.asset_id
+      WHERE t.asset_id IS NOT NULL
+        AND (a.market_cap_updated_at IS NULL OR a.market_cap_updated_at < ?)
+      ORDER BY a.market_cap_usd IS NULL DESC, a.market_cap_usd DESC`)
+      .bind(Date.now() - maxAgeMs)
+      .all<{ id: string }>()
+  ).results.map((row) => row.id);
+  let updated = 0;
+  let cursor = 0;
+  let throttled = false;
+  // Keyless upstreams throttle above a few requests per minute, so stay serial and gentle.
+  while (cursor < ids.length) {
+    if (Date.now() > deadline) {
+      throttled = true;
+      console.log("market_cap_refresh_deadline", { remaining: ids.length - cursor });
+      break;
+    }
+    try {
+      updated += await marketCapBatch({
+        env,
+        ids: ids.slice(cursor, cursor + 250),
+        now: Date.now(),
+      });
+    } catch (error) {
+      throttled = true;
+      console.error("market_cap_refresh_failed", {
+        remaining: ids.length - cursor,
+        message: error instanceof Error ? error.message : "Unknown upstream failure",
+      });
+      break;
+    }
+    cursor += 250;
+    if (cursor < ids.length) await new Promise((resolve) => setTimeout(resolve, 1200));
+  }
+  return { updated, remaining: throttled ? ids.length - cursor : 0 };
+}
+
 export async function seedMarketCaps({ env }: { env: Env }) {
   return withImportLock({
     env,
     key: "market_seed_lock",
     run: async () => {
-      if (await stateValue({ db: env.DB, key: "market_caps_seeded_at" }))
-        throw new Error("Market caps have already been seeded");
-      const ids = (
-        await env.DB.prepare(
-          "SELECT DISTINCT asset_id AS id FROM tokens WHERE asset_id IS NOT NULL ORDER BY asset_id",
-        ).all<{ id: string }>()
-      ).results.map((row) => row.id);
-      if (!ids.length) throw new Error("Sync the catalog before seeding market caps");
-      let offset = 0;
-      let count = 0;
-      while (offset < ids.length) {
-        const batch = priceBatch({ ids: ids.slice(offset, offset + 250) });
-        const markets = marketsSchema.parse(
-          await apiJson({
-            env,
-            path: "/coins/markets",
-            query: {
-              ids: batch.join(","),
-              vs_currency: "usd",
-              per_page: "250",
-              page: "1",
-              sparkline: "false",
-            },
-          }),
-        );
-        const now = Date.now();
-        const payload = markets.map((market) => ({
-          id: market.id,
-          image: market.image ?? null,
-          cap: market.market_cap ?? null,
-          updatedAt: market.last_updated ? Math.min(Date.parse(market.last_updated), now) : now,
-        }));
-        await env.DB.prepare(`UPDATE assets SET
-        image_url = COALESCE(json_extract(m.value, '$.image'), assets.image_url),
-        market_cap_usd = CASE WHEN COALESCE(assets.market_cap_updated_at, 0) <= json_extract(m.value, '$.updatedAt')
-          THEN json_extract(m.value, '$.cap') ELSE assets.market_cap_usd END,
-        market_cap_updated_at = MAX(COALESCE(assets.market_cap_updated_at, 0), json_extract(m.value, '$.updatedAt'))
-        FROM json_each(?) m WHERE assets.id = json_extract(m.value, '$.id')`)
-          .bind(JSON.stringify(payload))
-          .run();
-        count += markets.length;
-        offset += batch.length;
-        // Leave headroom under the Demo plan's minute limit during the one-time seed.
-        if (offset < ids.length) await new Promise((resolve) => setTimeout(resolve, 1000));
-      }
+      if (!(await stateValue({ db: env.DB, key: "catalog_synced_at" })))
+        throw new Error("Sync the catalog before seeding market caps");
+      // Large backfill budget; the scheduled job keeps caps fresh afterwards.
+      const { updated, remaining } = await refreshMarketCaps({
+        env,
+        maxAgeMs: Number.MAX_SAFE_INTEGER,
+        deadline: Date.now() + 12 * 60_000,
+      });
       const finishedAt = new Date().toISOString();
-      await setState({ db: env.DB, key: "market_caps_seeded_at", value: finishedAt });
-      return { assets: count, seededAt: finishedAt };
+      if (!remaining)
+        await setState({ db: env.DB, key: "market_caps_seeded_at", value: finishedAt });
+      return { assets: updated, complete: !remaining, remaining, seededAt: finishedAt };
     },
   });
 }

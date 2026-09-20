@@ -9,8 +9,8 @@ import {
   type D1Migration,
 } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { importChain, seedMarketCaps, syncCatalog } from "../src/catalog";
-import { getTokens, searchTokens, setState } from "../src/database";
+import { importChain, refreshMarketCaps, seedMarketCaps, syncCatalog } from "../src/catalog";
+import { getTokens, searchTokens, setState, stateValue } from "../src/database";
 import { REFRESH_MS, type Env as AppEnv } from "../src/types";
 import worker from "../src/index";
 
@@ -494,8 +494,15 @@ describe("upstream ingestion", () => {
     expect(token?.market_cap_usd).toBe(999);
     expect(token?.symbol).toBe("");
     expect(token?.image_url).toBe("https://example.com/test.png");
+    // A complete backfill is recorded, and repeat runs are idempotent.
+    expect(await stateValue({ db: env.DB, key: "market_caps_seeded_at" })).not.toBeNull();
     const calls = upstream.mock.calls.length;
-    await expect(seedMarketCaps({ env })).rejects.toThrow("already been seeded");
+    expect(await seedMarketCaps({ env })).toMatchObject({ complete: true, remaining: 0 });
+    expect(upstream.mock.calls.length).toBe(calls);
+    // Staleness refreshes only touch caps older than the cutoff.
+    expect(
+      await refreshMarketCaps({ env, maxAgeMs: 60_000, deadline: Date.now() + 5_000 }),
+    ).toEqual({ updated: 0, remaining: 0 });
     expect(upstream.mock.calls.length).toBe(calls);
   });
 });
