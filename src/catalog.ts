@@ -1,13 +1,17 @@
 import { CHAIN_REGISTRY_URL, discoverChains } from "./chains";
-import { apiJson, fetchJson, priceBatch } from "./coingecko";
-import { setState, stateValue } from "./database";
+import { apiJson, fetchJson } from "./coingecko";
+import { setState, stateValue, getChainSources } from "./database";
+import {
+  dexscreenerQuotes,
+  geckoTerminalNetworks,
+  geckoTerminalQuotes,
+  mergeQuotes,
+} from "./providers";
 import { HTTPException } from "hono/http-exception";
 import type { Env } from "./types";
 import {
   catalogReportSchema,
   chainRegistrySchema,
-  coinsSchema,
-  marketsSchema,
   platformsSchema,
   tokenListSchema,
   type TokenListToken,
@@ -74,12 +78,14 @@ export async function importChain({
   chain,
   tokens,
   hash,
+  gtNetwork,
   now,
 }: {
   db: D1Database;
   chain: { id: number; name: string; platform: string };
   tokens: CatalogToken[];
   hash?: string;
+  gtNetwork?: string | null;
   now: number;
 }) {
   if (tokens.length === 0 || tokens.some((token) => token.chainId !== chain.id))
@@ -88,9 +94,10 @@ export async function importChain({
   if (unique.size !== tokens.length)
     throw new Error(`Duplicate token addresses in chain ${chain.id}`);
   await db
-    .prepare(`INSERT INTO chains(id, name, platform_id) VALUES (?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET name = excluded.name, platform_id = excluded.platform_id`)
-    .bind(chain.id, chain.name, chain.platform)
+    .prepare(`INSERT INTO chains(id, name, platform_id, gt_network) VALUES (?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET name = excluded.name, platform_id = excluded.platform_id,
+      gt_network = COALESCE(excluded.gt_network, chains.gt_network)`)
+    .bind(chain.id, chain.name, chain.platform, gtNetwork ?? null)
     .run();
   for (let offset = 0; offset < tokens.length; offset += 200) {
     const payload = JSON.stringify(tokens.slice(offset, offset + 200));
@@ -152,7 +159,15 @@ async function withImportLock<T>({
   }
 }
 
-export async function syncCatalog({ env, budgetMs = 3 * 60_000 }: { env: Env; budgetMs?: number }) {
+export async function syncCatalog({
+  env,
+  budgetMs = 3 * 60_000,
+  maxAgeMs = 24 * 60 * 60 * 1000,
+}: {
+  env: Env;
+  budgetMs?: number;
+  maxAgeMs?: number;
+}) {
   return withImportLock({
     env,
     key: "catalog_lock",
@@ -161,49 +176,46 @@ export async function syncCatalog({ env, budgetMs = 3 * 60_000 }: { env: Env; bu
       // chains are reported and picked up by the next run.
       const deadline = Date.now() + budgetMs;
       try {
-        const [coins, platforms, registry] = await Promise.all([
-          apiJson({ env, path: "/coins/list", query: { include_platform: "true" } }).then((data) =>
-            coinsSchema.parse(data),
-          ),
+        // CoinGecko supplies the chain list and public token lists only. Prices and market
+        // caps come from address-keyed providers, so the large /coins/list mapping call and
+        // its ambiguous-asset resolution are no longer needed.
+        const [platforms, registry, networks] = await Promise.all([
           apiJson({ env, path: "/asset_platforms" }).then((data) => platformsSchema.parse(data)),
           fetchJson({ url: CHAIN_REGISTRY_URL }).then((data) => chainRegistrySchema.parse(data)),
+          geckoTerminalNetworks(),
         ]);
         const chains = discoverChains({ platforms, registry });
         if (!chains.length) throw new Error("CoinGecko returned no EVM platforms");
-        const mapping = new Map<string, string>();
-        for (const coin of coins) {
-          for (const [platform, address] of Object.entries(coin.platforms ?? {})) {
-            if (!address || !/^0x[0-9a-f]{40}$/i.test(address)) continue;
-            const key = `${platform}:${address.toLowerCase()}`;
-            const previous = mapping.get(key);
-            if (previous && previous !== coin.id)
-              throw new Error(`Ambiguous CoinGecko mapping: ${key}`);
-            mapping.set(key, coin.id);
-          }
-        }
         const imported: { chainId: number; tokens: number; discarded: number }[] = [];
         const skipped: { chainId: number; reason: string }[] = [];
         const failures: { chainId: number; message: string }[] = [];
         const missingNativeMetadata: number[] = [];
-        const missingNativeAssetId: number[] = [];
         const retryable: typeof chains = [];
-        const existingHashes = new Map(
+        const syncState = new Map(
           (
-            await env.DB.prepare(
-              "SELECT id, content_hash FROM chains WHERE content_hash IS NOT NULL",
-            ).all<{
+            await env.DB.prepare("SELECT id, synced_at, content_hash FROM chains").all<{
               id: number;
-              content_hash: string;
+              synced_at: number | null;
+              content_hash: string | null;
             }>()
-          ).results.map((row) => [row.id, row.content_hash]),
+          ).results.map((row) => [row.id, row]),
         );
-        const alreadySynced =
-          (
-            await env.DB.prepare(
-              "SELECT COUNT(*) AS count FROM chains WHERE synced_at IS NOT NULL",
-            ).first<{ count: number }>()
-          )?.count ?? 0;
-
+        const existingHashes = new Map(
+          [...syncState].flatMap(([id, row]) =>
+            row.content_hash ? [[id, row.content_hash] as const] : [],
+          ),
+        );
+        const alreadySynced = [...syncState.values()].filter(
+          (row) => row.synced_at !== null,
+        ).length;
+        // Only fetch lists that are due. Successful imports record `synced_at`, so chains that
+        // failed or were never imported stay due and are retried, while fresh chains are skipped
+        // entirely. This keeps bounded runs convergent instead of re-fetching from the start.
+        const staleBefore = Date.now() - maxAgeMs;
+        const due = chains.filter(
+          (chain) => (syncState.get(chain.id)?.synced_at ?? 0) < staleBefore,
+        );
+        const freshCount = chains.length - due.length;
         async function importOneChain({
           chain,
           retry = false,
@@ -225,13 +237,13 @@ export async function syncCatalog({ env, budgetMs = 3 * 60_000 }: { env: Env; bu
               return;
             }
             const { tokens, discarded } = parseTokens({ chainId: chain.id, list: list.tokens });
-            for (const token of tokens)
-              token.assetId = mapping.get(`${chain.platform}:${token.address}`) ?? null;
+            // Quote identity is the deployment itself, so no provider asset mapping is needed.
+            for (const token of tokens) token.assetId = `${chain.id}:${token.address}`;
             if (chain.native) {
               tokens.push({
                 chainId: chain.id,
                 address: "native",
-                assetId: chain.nativeAssetId,
+                assetId: `${chain.id}:native`,
                 ...chain.native,
                 imageUrl: null,
               });
@@ -245,10 +257,16 @@ export async function syncCatalog({ env, budgetMs = 3 * 60_000 }: { env: Env; bu
               skipped.push({ ...identity, reason: "unchanged" });
               return;
             }
-            await importChain({ db: env.DB, chain, tokens, hash, now: Date.now() });
+            await importChain({
+              db: env.DB,
+              chain,
+              tokens,
+              hash,
+              gtNetwork: networks.get(chain.platform) ?? null,
+              now: Date.now(),
+            });
             imported.push({ ...identity, tokens: tokens.length, discarded });
             if (!chain.native) missingNativeMetadata.push(chain.id);
-            if (!chain.nativeAssetId) missingNativeAssetId.push(chain.id);
           } catch (error) {
             const status =
               error instanceof Error && "upstreamStatus" in error ? error.upstreamStatus : null;
@@ -273,14 +291,16 @@ export async function syncCatalog({ env, budgetMs = 3 * 60_000 }: { env: Env; bu
 
         let cursor = 0;
         let budgetExhausted = false;
+        const deferred: number[] = [];
         // The token-list CDN throttles concurrent requests, so fetch serially with a small gap.
         async function importNextChains() {
           for (;;) {
-            const chain = chains[cursor++];
+            const chain = due[cursor++];
             if (!chain) return;
             if (Date.now() > deadline) {
               budgetExhausted = true;
               cursor--;
+              for (const rest of due.slice(cursor)) deferred.push(rest.id);
               return;
             }
             await importOneChain({ chain });
@@ -300,7 +320,7 @@ export async function syncCatalog({ env, budgetMs = 3 * 60_000 }: { env: Env; bu
           }
         }
         const finishedAt = new Date().toISOString();
-        const pending = chains
+        const pending = due
           .filter(
             (chain) =>
               !imported.some((item) => item.chainId === chain.id) &&
@@ -318,6 +338,7 @@ export async function syncCatalog({ env, budgetMs = 3 * 60_000 }: { env: Env; bu
                 : "complete"
               : "failed",
           budgetExhausted,
+          freshChains: freshCount,
           discoveredChains: chains.length,
           chains: imported.length,
           tokens: imported.reduce((sum, chain) => sum + chain.tokens, 0),
@@ -328,7 +349,6 @@ export async function syncCatalog({ env, budgetMs = 3 * 60_000 }: { env: Env; bu
           skipped: skipped.sort((a, b) => a.chainId - b.chainId),
           failures: failures.sort((a, b) => a.chainId - b.chainId),
           missingNativeMetadata: missingNativeMetadata.sort((a, b) => a - b),
-          missingNativeAssetId: missingNativeAssetId.sort((a, b) => a - b),
         });
         // A usable catalog stays usable; partial coverage is a warning, not an outage.
         const usable = imported.length > 0 || alreadySynced > 0;
@@ -353,27 +373,32 @@ export async function syncCatalog({ env, budgetMs = 3 * 60_000 }: { env: Env; bu
 }
 
 async function marketCapBatch({ env, ids, now }: { env: Env; ids: string[]; now: number }) {
-  const batch = priceBatch({ ids });
-  if (!batch.length) return 0;
-  const markets = marketsSchema.parse(
-    await apiJson({
-      env,
-      path: "/coins/markets",
-      query: {
-        ids: batch.join(","),
-        vs_currency: "usd",
-        per_page: "250",
-        page: "1",
-        sparkline: "false",
-      },
-    }),
+  const tokens = ids.map((id) => {
+    const [chainId, ...rest] = id.split(":");
+    return { chainId: Number(chainId), address: rest.join(":") };
+  });
+  const chainSources = await getChainSources({
+    db: env.DB,
+    chainIds: [...new Set(tokens.map((token) => token.chainId))],
+  });
+  const merged = mergeQuotes({
+    sources: [
+      await geckoTerminalQuotes({ tokens, chains: chainSources }),
+      await dexscreenerQuotes({ tokens, chains: chainSources }),
+    ],
+  });
+  const payload = [...merged].flatMap(([id, quote]) =>
+    quote.marketCapUsd === null
+      ? []
+      : [
+          {
+            id,
+            cap: quote.marketCapUsd,
+            image: quote.imageUrl,
+            updatedAt: quote.marketCapUpdatedAt ?? now,
+          },
+        ],
   );
-  const payload = markets.map((market) => ({
-    id: market.id,
-    image: market.image ?? null,
-    cap: market.market_cap ?? null,
-    updatedAt: market.last_updated ? Math.min(Date.parse(market.last_updated), now) : now,
-  }));
   if (payload.length) {
     await env.DB.prepare(`UPDATE assets SET
       image_url = COALESCE(json_extract(m.value, '$.image'), assets.image_url),
@@ -398,13 +423,15 @@ export async function refreshMarketCaps({
   maxAgeMs: number;
   deadline: number;
 }) {
+  // A non-finite max age means "refresh everything"; Date.now() - Infinity would overflow.
+  const staleBefore = Number.isFinite(maxAgeMs) ? Date.now() - maxAgeMs : Date.now() + 1;
   const ids = (
     await env.DB.prepare(`SELECT DISTINCT t.asset_id AS id FROM tokens t
       JOIN assets a ON a.id = t.asset_id
       WHERE t.asset_id IS NOT NULL
         AND (a.market_cap_updated_at IS NULL OR a.market_cap_updated_at < ?)
       ORDER BY a.market_cap_usd IS NULL DESC, a.market_cap_usd DESC`)
-      .bind(Date.now() - maxAgeMs)
+      .bind(staleBefore)
       .all<{ id: string }>()
   ).results.map((row) => row.id);
   let updated = 0;
@@ -420,7 +447,7 @@ export async function refreshMarketCaps({
     try {
       updated += await marketCapBatch({
         env,
-        ids: ids.slice(cursor, cursor + 250),
+        ids: ids.slice(cursor, cursor + 60),
         now: Date.now(),
       });
     } catch (error) {
@@ -431,7 +458,7 @@ export async function refreshMarketCaps({
       });
       break;
     }
-    cursor += 250;
+    cursor += 60;
     if (cursor < ids.length) await new Promise((resolve) => setTimeout(resolve, 1200));
   }
   return { updated, remaining: throttled ? ids.length - cursor : 0 };
@@ -447,7 +474,7 @@ export async function seedMarketCaps({ env }: { env: Env }) {
       // Large backfill budget; the scheduled job keeps caps fresh afterwards.
       const { updated, remaining } = await refreshMarketCaps({
         env,
-        maxAgeMs: Number.MAX_SAFE_INTEGER,
+        maxAgeMs: 30 * 24 * 60 * 60 * 1000,
         deadline: Date.now() + 12 * 60_000,
       });
       const finishedAt = new Date().toISOString();

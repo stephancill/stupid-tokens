@@ -1,9 +1,9 @@
 import { DurableObject } from "cloudflare:workers";
 import { z } from "zod";
-import { apiJson, priceBatch } from "./coingecko";
-import { getQuotes, writeQuotes } from "./database";
-import { assetIdsSchema, priceDataSchema } from "./validation";
-import { decimal, REFRESH_MS, type Env, type QuoteRow } from "./types";
+import { getChainSources, getQuotes, writeQuotes } from "./database";
+import { defillamaQuotes, dexscreenerQuotes, geckoTerminalQuotes, mergeQuotes } from "./providers";
+import { refreshIdsSchema } from "./validation";
+import { REFRESH_MS, type Env, type QuoteRow } from "./types";
 
 type Pending = {
   promise: Promise<QuoteRow>;
@@ -30,7 +30,7 @@ export class PriceCoordinator extends DurableObject<Env> {
   }
 
   async getPrices({ ids }: { ids: string[] }): Promise<QuoteRow[]> {
-    const validated = [...new Set(assetIdsSchema.parse(ids))];
+    const validated = [...new Set(refreshIdsSchema.parse(ids))];
     const promises = validated.map((id) => {
       const existing = this.pending.get(id);
       if (existing) return existing.promise;
@@ -56,7 +56,8 @@ export class PriceCoordinator extends DurableObject<Env> {
     await new Promise((resolve) => setTimeout(resolve, 25));
     try {
       while (this.queue.size) {
-        const ids = priceBatch({ ids: [...this.queue] });
+        // Keep batches within the tightest per-request provider limit.
+        const ids = [...this.queue].slice(0, 30);
         for (const id of ids) this.queue.delete(id);
         try {
           const rows = await this.refresh({ ids });
@@ -182,41 +183,42 @@ export class PriceCoordinator extends DurableObject<Env> {
     let quotes: QuoteRow[];
     let updateMarketCap = false;
     try {
-      const data = priceDataSchema.parse(
-        await apiJson({
-          env: this.env,
-          path: "/simple/price",
-          query: {
-            ids: reserved.map((row) => row.id).join(","),
-            vs_currencies: "usd",
-            include_market_cap: "true",
-            include_last_updated_at: "true",
-            precision: "full",
-          },
-        }),
-      );
+      // Identity is chainId:address, so sources are queried by chain and address directly.
+      const tokens = reserved.map((row) => {
+        const [chainId, ...rest] = row.id.split(":");
+        return { chainId: Number(chainId), address: rest.join(":") };
+      });
+      const chainSources = await getChainSources({
+        db: this.env.DB,
+        chainIds: [...new Set(tokens.map((token) => token.chainId))],
+      });
       const fetchedAt = Date.now();
+      const merged = mergeQuotes({
+        sources: [
+          await defillamaQuotes({ tokens, chains: chainSources }),
+          await geckoTerminalQuotes({ tokens, chains: chainSources }),
+          await dexscreenerQuotes({ tokens, chains: chainSources }),
+        ],
+      });
       quotes = reserved.map((row): QuoteRow => {
-        const value = data[row.id];
-        const updatedAt = value?.last_updated_at ? value.last_updated_at * 1000 : null;
-        const valid =
-          value?.usd !== null &&
-          value?.usd !== undefined &&
-          updatedAt !== null &&
-          updatedAt <= fetchedAt + 60_000;
+        const value = merged.get(row.id);
+        const updatedAt = value?.priceUpdatedAt ?? null;
+        const fresh = updatedAt === null || updatedAt <= fetchedAt + 60_000;
+        const valid = Boolean(value?.priceUsd) && fresh;
         const newerCap =
-          value?.usd_market_cap !== undefined &&
-          updatedAt !== null &&
-          updatedAt <= fetchedAt + 60_000 &&
-          updatedAt >= (row.market_cap_updated_at ?? 0);
+          value?.marketCapUsd !== null &&
+          value?.marketCapUsd !== undefined &&
+          (value.marketCapUpdatedAt ?? 0) >= (row.market_cap_updated_at ?? 0);
         return {
           ...row,
-          price_usd: valid ? decimal({ value: value.usd! }) : null,
+          price_usd: valid ? value!.priceUsd : null,
           price_updated_at: updatedAt,
           price_status: valid ? "ok" : "price_unavailable",
           fetched_at: fetchedAt,
-          market_cap_usd: newerCap ? (value.usd_market_cap ?? null) : row.market_cap_usd,
-          market_cap_updated_at: newerCap ? updatedAt : row.market_cap_updated_at,
+          market_cap_usd: newerCap ? value!.marketCapUsd : row.market_cap_usd,
+          market_cap_updated_at: newerCap
+            ? (value!.marketCapUpdatedAt ?? fetchedAt)
+            : row.market_cap_updated_at,
         };
       });
       updateMarketCap = true;

@@ -4,9 +4,17 @@
 
 Public, keyless EVM token metadata, name/symbol/address search ordered by market cap, and USD bulk pricing. A request accepts up to 100 mixed-chain tokens. Native currencies use `native` as the address. Unknown tokens and unavailable prices have explicit per-item statuses.
 
-Token lists provide deployment metadata, including decimals and nullable images. CoinGecko's coins list maps chain/address pairs to source asset IDs. Market cap belongs to the source asset globally, not to the supply on a single chain.
+Token lists provide deployment metadata, including decimals and nullable images. Prices and market caps come from address-keyed providers, so identity is always `chainId + address` and no provider coin-ID mapping is required.
 
-All external identities use numeric chain IDs and chain/address token pairs. Provider-specific platform and asset IDs stay internal. Operator reports are projected through an explicit response schema, and upstream error details stay in logs. Chain responses expose `chainId`, `name`, `tokenCount`, and `syncedAt`.
+Price and market-cap sources are tried in order and merged per field:
+
+1. **DefiLlama** (`coins.llama.fi`) is the primary price source. It accepts large batches, returns a source `timestamp` and a `confidence`, and supports native currencies through the zero address. It does not provide market caps.
+2. **GeckoTerminal** (`api.geckoterminal.com`) supplies per-deployment market caps and images, and acts as a price fallback. It is queried per network with up to 30 addresses and reports pool liquidity.
+3. **DexScreener** (`api.dexscreener.com`) is the long-tail fallback, queried through the chain-scoped `/tokens/v1/{chain}/{addresses}` endpoint. Its unscoped endpoint ignores the chain, so it must not be used. A token can have many pairs, so only the deepest-liquidity pair is considered.
+
+DEX-derived prices are trivially manipulable in thin pools, so GeckoTerminal and DexScreener values are only accepted when pool liquidity meets a minimum. DefiLlama prices are aggregated and additionally require a minimum reported confidence. Market cap is per deployment rather than one global value shared across chains, which matches the chain-specific token list.
+
+Provider chain slugs are derived from the CoinGecko platform ID with a small alias table, and GeckoTerminal network slugs are discovered from its `/networks` endpoint because they differ (`eth` versus `ethereum`). CoinGecko remains in use only for the chain list and public token lists; the large `/coins/list` mapping call is no longer needed.
 
 Prices refresh only on demand. A source asset gets at most one upstream attempt in a rolling 300-second interval, including failed attempts. The interval starts immediately before dispatch, and persists across coordinator eviction. Price age uses the source timestamp; cache lifetime uses the attempt timestamp. The API exposes both and reports stale source prices explicitly rather than implying that a recent fetch guarantees recent source data.
 
@@ -37,4 +45,6 @@ Other HTTP, validation, and import failures are recorded per chain; successful c
 
 Bulk limits, shared 300-second reservations, provider-level request budgets, short-lived shared edge caches, and change-only catalog upserts bound work. Public requests cannot start metadata imports or market-cap seeding. Unknown tokens never trigger upstream lookups.
 
-CoinGecko API access and public data redistribution are separate concerns; production operation requires appropriate upstream terms. The implementation runs keyless by default, which keeps operation free but shares a low, contended IP-based rate pool that is unsuitable for production traffic. A Demo or Pro key raises upstream limits without changing the architecture.
+None of the price sources require an API key. DefiLlama accepts large batches; GeckoTerminal and DexScreener accept 30 addresses per request, so one 100-token bulk request costs a small, fixed number of upstream calls per refresh. Keyless sources share low, contended rate pools, so the default request budget is deliberately conservative and the nightly job refreshes only metadata that is due rather than polling continuously.
+
+Upstream data access and public data redistribution are separate concerns; production operation requires appropriate upstream terms.

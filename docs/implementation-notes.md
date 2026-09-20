@@ -73,3 +73,16 @@
 - Removed platform identifiers from synchronization reports. Imported/skipped/failed entries use `chainId`, and both missing-native arrays contain chain IDs. Source asset IDs remain internal to ingestion, storage, and price coordination.
 - Added an explicit report response schema and projected operator status fields. Detailed upstream errors are kept in Worker logs, with provider-neutral chain-based failure messages in responses.
 - Updated API documentation and existing runtime assertions for the response contract. No compatibility aliases are provided for removed provider-specific fields.
+
+## Address-keyed multi-source pricing
+
+- Replaced CoinGecko's coin-ID pricing with address-keyed sources, so identity is `chainId + address` end to end and the 3.7 MB `/coins/list` mapping call plus its ambiguous-asset resolution are gone. CoinGecko is still used for the chain list and public token lists.
+- Added DefiLlama as the primary price source (large batches, source timestamp, confidence, native via the zero address), GeckoTerminal for per-deployment market caps and images, and DexScreener as the long-tail fallback.
+- DexScreener must use the chain-scoped `/tokens/v1/{chain}/{addresses}` endpoint. Verified live that the unscoped `/latest/dex/tokens/{addresses}` returns pairs from unrelated chains for the same address.
+- DEX prices are only accepted when pool liquidity clears a minimum, and DefiLlama prices require a minimum confidence, because thin pools are trivially manipulable.
+- Market caps are now per deployment rather than one global value shared across chains. Search ordering therefore reflects the deployment being searched.
+- Added `migrations/0003_chain_geckoterminal_network.sql`. GeckoTerminal network slugs differ from CoinGecko platform ids (`eth` vs `ethereum`), so they are discovered from GeckoTerminal's `/networks` endpoint during sync rather than guessed. DefiLlama and DexScreener slugs are derived from the platform id with a small alias table.
+- Assets are keyed by the deployment itself (`chainId:address`), which reuses the existing quote, reservation, budget, and search-join machinery without a schema rewrite.
+- Fixed a related defect: the market-cap backfill passed an effectively infinite max age, which overflowed the SQL cutoff and selected no rows. The backfill now uses a 30-day window, so it is idempotent once complete while still filling newly added tokens.
+- Sync convergence fix: only chains whose `synced_at` is stale are fetched. Because `synced_at` is written only on success, failed or never-imported chains stay due and are retried, while fresh chains are skipped entirely. Previously every run re-fetched from the start and could never advance past the time budget. Reports now include `freshChains`, and `pending` counts only due chains.
+- Updated Workers-runtime tests to mock the three providers and to assert per-deployment market-cap ordering, and updated the API and architecture documentation.

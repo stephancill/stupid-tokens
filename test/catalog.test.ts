@@ -57,13 +57,15 @@ function upstream({
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
     if (url.pathname.endsWith("/asset_platforms")) return Response.json(platforms);
-    if (url.pathname.endsWith("/coins/list"))
-      return Response.json([
-        {
-          id: "shared-token",
-          platforms: Object.fromEntries(platforms.map((item) => [item.id, tokenAddress])),
-        },
-      ]);
+    if (url.hostname === "api.geckoterminal.com" && url.pathname.endsWith("/networks"))
+      return Response.json({
+        data: platforms
+          .filter((item) => item.chain_identifier !== null)
+          .map((item) => ({
+            id: `gt-${item.id}`,
+            attributes: { coingecko_asset_platform_id: item.id },
+          })),
+      });
     if (url.hostname === "chainid.network")
       return Response.json(
         nativeChainIds.map((chainId) => ({
@@ -124,7 +126,6 @@ it("discovers unconfigured EVM chains, encodes platform IDs, and excludes null-I
     { chainId: 9876543, tokens: 1, discarded: 0 },
   ]);
   expect(report.missingNativeMetadata).toEqual([9876543]);
-  expect(report.missingNativeAssetId).toEqual([173]);
   const native = await getTokens({
     db: env.DB,
     tokens: [
@@ -133,7 +134,8 @@ it("discovers unconfigured EVM chains, encodes platform IDs, and excludes null-I
     ],
   });
   expect(native.map((token) => token.decimals)).toEqual([8, 8]);
-  expect(native.find((token) => token.chain_id === 173)?.asset_id).toBeNull();
+  // Assets are now keyed by the deployment itself, so native always has an id.
+  expect(native.find((token) => token.chain_id === 173)?.asset_id).toBe("173:native");
   expect(
     await getTokens({ db: env.DB, tokens: [{ chainId: 9876543, address: tokenAddress }] }),
   ).toHaveLength(1);
@@ -256,8 +258,10 @@ it("sends the provider key header only when a key is configured", async () => {
       return Response.json([
         { chainId: 1, nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 } },
       ]);
-    if (url.pathname.endsWith("/coins/list"))
-      return Response.json([{ id: "x", platforms: { ethereum: address({ n: 5 }) } }]);
+    if (url.hostname === "api.geckoterminal.com" && url.pathname.endsWith("/networks"))
+      return Response.json({
+        data: [{ id: "gt-eth", attributes: { coingecko_asset_platform_id: "ethereum" } }],
+      });
     if (url.pathname.endsWith("/asset_platforms"))
       return Response.json(
         chains.map((chain) => ({
@@ -302,10 +306,9 @@ it("skips unchanged lists on repeat sync and reports pending chains", async () =
   const second = await syncCatalog({ env });
   expect(second.chains).toBe(0);
   expect(second.tokens).toBe(0);
-  expect(second.skipped).toEqual([
-    { chainId: 146, reason: "unchanged" },
-    { chainId: 147, reason: "token_list_http_404" },
-  ]);
+  // Recently synced chains are not fetched at all; only due chains are retried.
+  expect(second.skipped).toEqual([{ chainId: 147, reason: "token_list_http_404" }]);
+  expect(second.freshChains).toBe(1);
   expect(second.status).toBe("complete");
 });
 

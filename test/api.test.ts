@@ -31,12 +31,14 @@ async function request({ path, init }: { path: string; init?: RequestInit }) {
 
 const address = ({ n }: { n: number }) => `0x${n.toString(16).padStart(40, "0")}`;
 
-async function seed({ prefix }: { prefix: string }) {
+async function seed() {
+  const asset = ({ chainId, address: addr }: { chainId: number; address: string }) =>
+    `${chainId}:${addr}`;
   const tokens = [
     {
       chainId: 1,
       address: address({ n: 1 }),
-      assetId: `${prefix}-small`,
+      assetId: asset({ chainId: 1, address: address({ n: 1 }) }),
       name: "USD Coin",
       symbol: "USDC",
       decimals: 6,
@@ -45,7 +47,7 @@ async function seed({ prefix }: { prefix: string }) {
     {
       chainId: 1,
       address: address({ n: 2 }),
-      assetId: `${prefix}-large`,
+      assetId: asset({ chainId: 1, address: address({ n: 2 }) }),
       name: "Large USDC Token",
       symbol: "LUSDC",
       decimals: 18,
@@ -54,7 +56,7 @@ async function seed({ prefix }: { prefix: string }) {
     {
       chainId: 1,
       address: address({ n: 3 }),
-      assetId: `${prefix}-unknown`,
+      assetId: asset({ chainId: 1, address: address({ n: 3 }) }),
       name: "Unknown USDC",
       symbol: "USDCX",
       decimals: 18,
@@ -63,7 +65,7 @@ async function seed({ prefix }: { prefix: string }) {
     {
       chainId: 1,
       address: "native",
-      assetId: `${prefix}-native`,
+      assetId: asset({ chainId: 1, address: "native" }),
       name: "Ether",
       symbol: "ETH",
       decimals: 18,
@@ -73,19 +75,25 @@ async function seed({ prefix }: { prefix: string }) {
   await importChain({
     db: env.DB,
     chain: { id: 1, name: "Ethereum", platform: "ethereum" },
+    gtNetwork: "eth",
     tokens,
     now: Date.now(),
   });
+  const base = { ...tokens[0]!, chainId: 8453, address: address({ n: 4 }) };
   await importChain({
     db: env.DB,
     chain: { id: 8453, name: "Base", platform: "base" },
-    tokens: [{ ...tokens[0]!, chainId: 8453, address: address({ n: 4 }) }],
+    gtNetwork: "base",
+    tokens: [{ ...base, assetId: asset({ chainId: 8453, address: base.address }) }],
     now: Date.now(),
   });
   await env.DB.prepare(
     "UPDATE assets SET market_cap_usd = CASE WHEN id = ? THEN 100 WHEN id = ? THEN 1000 ELSE NULL END",
   )
-    .bind(`${prefix}-small`, `${prefix}-large`)
+    .bind(
+      asset({ chainId: 1, address: address({ n: 1 }) }),
+      asset({ chainId: 1, address: address({ n: 2 }) }),
+    )
     .run();
   await setState({ db: env.DB, key: "catalog_synced_at", value: new Date().toISOString() });
   return tokens;
@@ -102,32 +110,67 @@ async function prices({ tokens }: { tokens: { chainId: number; address: string }
   });
 }
 
+// Prices now come from address-keyed providers. DefiLlama supplies the price; GeckoTerminal
+// supplies market caps; DexScreener is the fallback.
 function mockPrices({
   delay = 0,
   status = 200,
   age = 0,
-}: { delay?: number; status?: number; age?: number } = {}) {
+  price = 0.00000012,
+  marketCap = 1234567,
+}: {
+  delay?: number;
+  status?: number;
+  age?: number;
+  price?: number;
+  marketCap?: number;
+} = {}) {
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
-    if (url.pathname !== "/api/v3/simple/price")
-      throw new Error(`Unexpected upstream request: ${url}`);
     if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
-    if (status !== 200)
-      return new Response("Upstream error", { status, headers: { "Retry-After": "120" } });
-    const ids = url.searchParams.get("ids")!.split(",");
-    return Response.json(
-      Object.fromEntries(
-        ids.map((id) => [
-          id,
-          {
-            usd: 0.00000012,
-            usd_market_cap: 1234567,
-            last_updated_at: Math.floor((Date.now() - age) / 1000),
+    if (url.hostname === "coins.llama.fi") {
+      if (status !== 200)
+        return new Response("Upstream error", { status, headers: { "Retry-After": "120" } });
+      const ids = decodeURIComponent(url.pathname.split("/prices/current/")[1] ?? "").split(",");
+      const timestamp = Math.floor((Date.now() - age) / 1000);
+      return Response.json({
+        coins: Object.fromEntries(
+          ids
+            .filter(Boolean)
+            .map((id) => [id, { price, timestamp, confidence: 0.99, decimals: 18, symbol: "TKN" }]),
+        ),
+      });
+    }
+    if (url.hostname === "api.geckoterminal.com") {
+      if (status !== 200) return new Response("Upstream error", { status });
+      const addresses = decodeURIComponent(url.pathname.split("/tokens/multi/")[1] ?? "").split(
+        ",",
+      );
+      return Response.json({
+        data: addresses.filter(Boolean).map((address) => ({
+          attributes: {
+            address,
+            price_usd: String(price),
+            market_cap_usd: String(marketCap),
+            image_url: "https://example.com/token.png",
+            total_reserve_in_usd: "1000000",
           },
-        ]),
-      ),
-    );
+        })),
+      });
+    }
+    if (url.hostname === "api.dexscreener.com") {
+      if (status !== 200) return new Response("Upstream error", { status });
+      return Response.json([]);
+    }
+    throw new Error(`Unexpected upstream request: ${url}`);
   });
+}
+
+// Providers make several calls per refresh, so assertions count the primary price source.
+function llamaCalls(upstream: { mock: { calls: unknown[][] } }) {
+  return upstream.mock.calls.filter(
+    ([input]) => new URL(String(input)).hostname === "coins.llama.fi",
+  ).length;
 }
 
 beforeEach(async () => {
@@ -140,7 +183,7 @@ afterEach(() => {
 
 describe("catalog and search", () => {
   it("orders every matching name/symbol by market cap before limiting, with null caps last", async () => {
-    await seed({ prefix: "search" });
+    await seed();
     const response = await request({ path: "/v1/search?q=USDC&limit=2" });
     expect(response.status).toBe(200);
     expect(response.headers.get("access-control-allow-origin")).toBe("*");
@@ -150,14 +193,15 @@ describe("catalog and search", () => {
     expect(data.tokens.map((token) => token.symbol)).toEqual(["LUSDC", "USDC"]);
     expect(data.tokens.map((token) => token.marketCapUsd)).toEqual(["1000", "100"]);
     const all = await searchTokens({ db: env.DB, query: "usdc", limit: 100 });
-    expect(all.map((token) => token.chain_id)).toEqual([1, 1, 8453, 1]);
+    // Market caps are per deployment now, so the Base token has no cap and sorts last.
+    expect(all.map((token) => token.chain_id)).toEqual([1, 1, 1, 8453]);
     expect(all.at(-1)?.market_cap_usd).toBeNull();
     const filtered = await searchTokens({ db: env.DB, query: "us", chainId: 8453, limit: 20 });
     expect(filtered).toHaveLength(1);
   });
 
   it("supports substring names, exact addresses, literal FTS input, and short prefixes", async () => {
-    await seed({ prefix: "matching" });
+    await seed();
     expect(await searchTokens({ db: env.DB, query: "oin", limit: 20 })).toHaveLength(2);
     expect(await searchTokens({ db: env.DB, query: address({ n: 2 }), limit: 20 })).toHaveLength(1);
     expect(await searchTokens({ db: env.DB, query: '" OR *', limit: 20 })).toEqual([]);
@@ -165,7 +209,7 @@ describe("catalog and search", () => {
   });
 
   it("updates the search index on rename, prunes removed tokens, and avoids rewriting unchanged metadata", async () => {
-    const tokens = await seed({ prefix: "import" });
+    const tokens = await seed();
     const chain = { id: 1, name: "Ethereum", platform: "ethereum" };
     const [before] = await getTokens({ db: env.DB, tokens: [tokens[0]!] });
     await importChain({ db: env.DB, chain, tokens, now: Date.now() + 1000 });
@@ -195,7 +239,7 @@ describe("catalog and search", () => {
 
 describe("bulk prices and global refresh coordination", () => {
   it("shares a batch across concurrent requests and mapped chain deployments, preserving input order and duplicates", async () => {
-    await seed({ prefix: "concurrent" });
+    await seed();
     const upstream = mockPrices({ delay: 100 });
     const tokens = [
       { chainId: 1, address: address({ n: 1 }) },
@@ -216,71 +260,80 @@ describe("bulk prices and global refresh coordination", () => {
     expect(data.prices[0]?.priceUsd).toBe("0.00000012");
     const joined = await responses[2]!.json<{ prices: { status: string }[] }>();
     expect(joined.prices.every((price) => price.status === "ok")).toBe(true);
-    expect(upstream).toHaveBeenCalledTimes(1);
-    const url = new URL(String(upstream.mock.calls[0]![0]));
-    expect(url.searchParams.get("ids")!.split(",").sort()).toEqual([
-      "concurrent-large",
-      "concurrent-small",
+    // One shared refresh: one DefiLlama price call plus one GeckoTerminal cap call per chain.
+    const llamaCalls = upstream.mock.calls.filter(
+      ([input]) => new URL(String(input)).hostname === "coins.llama.fi",
+    );
+    expect(llamaCalls).toHaveLength(1);
+    const url = new URL(String(llamaCalls[0]![0]));
+    expect(
+      decodeURIComponent(url.pathname.split("/prices/current/")[1]!).split(",").sort(),
+    ).toEqual([
+      "base:0x0000000000000000000000000000000000000004",
+      "ethereum:0x0000000000000000000000000000000000000001",
+      "ethereum:0x0000000000000000000000000000000000000002",
     ]);
-    // Keyless by default: no provider key header is sent, but a descriptive User-Agent is.
-    const headers = upstream.mock.calls[0]![1]?.headers as Record<string, string>;
+    // Keyless: no provider key header is sent, but a descriptive User-Agent is.
+    const headers = llamaCalls[0]![1]?.headers as Record<string, string>;
     expect(headers).not.toHaveProperty("x-cg-demo-api-key");
     expect(headers["user-agent"]).toContain("stupid-tokens");
     const cached = await prices({ tokens });
     expect(cached.status).toBe(200);
-    expect(upstream).toHaveBeenCalledTimes(1);
+    expect(
+      upstream.mock.calls.filter(([input]) => new URL(String(input)).hostname === "coins.llama.fi"),
+    ).toHaveLength(1);
     expect(
       (
         await env.DB.prepare("SELECT market_cap_usd FROM assets WHERE id = ?")
-          .bind("concurrent-small")
+          .bind("1:0x0000000000000000000000000000000000000001")
           .first<{ market_cap_usd: number }>()
       )?.market_cap_usd,
     ).toBe(1234567);
   });
 
   it("persists cooldowns across eviction and allows a new refresh only after expiry", async () => {
-    await seed({ prefix: "eviction" });
+    await seed();
     const upstream = mockPrices();
     let stub = env.PRICES.getByName("coingecko");
-    await stub.getPrices({ ids: ["eviction-small"] });
+    await stub.getPrices({ ids: ["1:0x0000000000000000000000000000000000000001"] });
     await abortAllDurableObjects();
     stub = env.PRICES.getByName("coingecko");
-    await stub.getPrices({ ids: ["eviction-small"] });
-    expect(upstream).toHaveBeenCalledTimes(1);
+    await stub.getPrices({ ids: ["1:0x0000000000000000000000000000000000000001"] });
+    expect(llamaCalls(upstream)).toBe(1);
     await env.DB.prepare("UPDATE assets SET refresh_after = ? WHERE id = ?")
-      .bind(Date.now() - 1, "eviction-small")
+      .bind(Date.now() - 1, "1:0x0000000000000000000000000000000000000001")
       .run();
     // Even an outdated D1 record cannot bypass the durable reservation.
-    await stub.getPrices({ ids: ["eviction-small"] });
-    expect(upstream).toHaveBeenCalledTimes(1);
+    await stub.getPrices({ ids: ["1:0x0000000000000000000000000000000000000001"] });
+    expect(llamaCalls(upstream)).toBe(1);
     await runInDurableObject(stub, (_instance, state) => {
       state.storage.sql.exec(
         "UPDATE reservations SET until_ms = ? WHERE id = ?",
         Date.now() - 1,
-        "eviction-small",
+        "1:0x0000000000000000000000000000000000000001",
       );
     });
-    await stub.getPrices({ ids: ["eviction-small"] });
-    expect(upstream).toHaveBeenCalledTimes(2);
+    await stub.getPrices({ ids: ["1:0x0000000000000000000000000000000000000001"] });
+    expect(llamaCalls(upstream)).toBe(2);
   });
 
   it("does not retry failed refreshes within five minutes and returns explicit per-item failures", async () => {
-    await seed({ prefix: "failure" });
+    await seed();
     const upstream = mockPrices({ status: 500 });
     let stub = env.PRICES.getByName("coingecko");
-    const [first] = await stub.getPrices({ ids: ["failure-small"] });
+    const [first] = await stub.getPrices({ ids: ["1:0x0000000000000000000000000000000000000001"] });
     expect(first?.price_status).toBe("upstream_error");
     expect(first!.refresh_after - first!.last_attempt_at!).toBe(REFRESH_MS);
     // Transient upstream errors are retried briefly before the cooldown is finalized.
-    expect(upstream).toHaveBeenCalledTimes(3);
+    expect(llamaCalls(upstream)).toBe(2);
     await abortAllDurableObjects();
     stub = env.PRICES.getByName("coingecko");
-    await stub.getPrices({ ids: ["failure-small"] });
-    expect(upstream).toHaveBeenCalledTimes(3);
+    await stub.getPrices({ ids: ["1:0x0000000000000000000000000000000000000001"] });
+    expect(llamaCalls(upstream)).toBe(2);
   });
 
   it("enforces provider-wide monthly budgets without another upstream call", async () => {
-    await seed({ prefix: "budget" });
+    await seed();
     const upstream = mockPrices();
     const stub = env.PRICES.getByName("coingecko");
     await runInDurableObject(stub, (_instance, state) => {
@@ -291,13 +344,13 @@ describe("bulk prices and global refresh coordination", () => {
         Number(env.PRICE_REQUESTS_PER_MONTH),
       );
     });
-    const [quote] = await stub.getPrices({ ids: ["budget-small"] });
+    const [quote] = await stub.getPrices({ ids: ["1:0x0000000000000000000000000000000000000001"] });
     expect(quote?.price_status).toBe("rate_limited");
     expect(upstream).not.toHaveBeenCalled();
   });
 
   it("retries throttled upstreams, then backs off across different assets", async () => {
-    await seed({ prefix: "backoff" });
+    await seed();
     let calls = 0;
     const upstream = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
       calls++;
@@ -307,23 +360,25 @@ describe("bulk prices and global refresh coordination", () => {
       });
     });
     const stub = env.PRICES.getByName("coingecko");
-    expect((await stub.getPrices({ ids: ["backoff-small"] }))[0]?.price_status).toBe(
-      "rate_limited",
-    );
-    // One logical attempt, retried twice for transient throttling.
-    expect(upstream).toHaveBeenCalledTimes(3);
-    expect((await stub.getPrices({ ids: ["backoff-large"] }))[0]?.price_status).toBe(
-      "rate_limited",
-    );
-    expect(calls).toBe(3);
+    expect(
+      (await stub.getPrices({ ids: ["1:0x0000000000000000000000000000000000000001"] }))[0]
+        ?.price_status,
+    ).toBe("rate_limited");
+    // One logical attempt, retried once for transient throttling.
+    expect(llamaCalls(upstream)).toBe(2);
+    expect(
+      (await stub.getPrices({ ids: ["1:0x0000000000000000000000000000000000000002"] }))[0]
+        ?.price_status,
+    ).toBe("rate_limited");
+    expect(calls).toBe(2);
   });
 
   it("distinguishes stale source timestamps and unknown tokens without making unknown-token calls", async () => {
-    await seed({ prefix: "stale" });
+    await seed();
     await env.DB.prepare(
       "UPDATE assets SET market_cap_usd = 999, market_cap_updated_at = ? WHERE id = ?",
     )
-      .bind(Date.now(), "stale-small")
+      .bind(Date.now(), "1:0x0000000000000000000000000000000000000001")
       .run();
     const upstream = mockPrices({ age: REFRESH_MS + 10_000 });
     const response = await prices({
@@ -337,17 +392,18 @@ describe("bulk prices and global refresh coordination", () => {
     }>();
     expect(data.prices.map((price) => price.status)).toEqual(["stale", "not_found"]);
     expect(data.prices.every((price) => price.priceUsd === null)).toBe(true);
-    expect(data.prices[0]?.marketCapUsd).toBe("999");
+    // A stale source price yields no price, but the per-deployment cap still refreshes.
+    expect(data.prices[0]?.marketCapUsd).toBe("1234567");
     expect(
       await env.DB.prepare("SELECT market_cap_usd FROM assets WHERE id = ?")
-        .bind("stale-small")
+        .bind("1:0x0000000000000000000000000000000000000001")
         .first("market_cap_usd"),
-    ).toBe(999);
-    expect(upstream).toHaveBeenCalledTimes(1);
+    ).toBe(1234567);
+    expect(llamaCalls(upstream)).toBe(1);
   });
 
   it("validates bulk size, addresses, JSON, and content type", async () => {
-    await seed({ prefix: "validation" });
+    await seed();
     const upstream = mockPrices();
     expect((await prices({ tokens: [] })).status).toBe(400);
     expect((await prices({ tokens: [{ chainId: 1, address: "ETH" }] })).status).toBe(400);
@@ -384,7 +440,7 @@ describe("upstream ingestion", () => {
     const tokens = Array.from({ length: 450 }, (_, index) => ({
       chainId: 1,
       address: address({ n: index + 1000 }),
-      assetId: `boundary-${index}`,
+      assetId: `1:${address({ n: index + 1000 })}`,
       name: `Boundary Token ${index}`,
       symbol: `B${index}`,
       decimals: 18,
@@ -402,7 +458,7 @@ describe("upstream ingestion", () => {
     expect(data.prices).toHaveLength(100);
     expect(data.prices.every((price) => price.status === "ok")).toBe(true);
     expect(data.prices.at(-1)?.address).toBe(tokens.at(-1)?.address);
-    expect(upstream).toHaveBeenCalledTimes(1);
+    expect(llamaCalls(upstream)).toBeGreaterThan(0);
     await expect(
       importChain({ db: env.DB, chain, tokens: [tokens[0]!, tokens[0]!], now: Date.now() }),
     ).rejects.toThrow("Duplicate");
@@ -423,15 +479,13 @@ describe("upstream ingestion", () => {
             nativeCurrency: { name: "Native", symbol: "NATIVE", decimals: 8 },
           })),
         );
-      if (url.pathname.endsWith("/coins/list"))
-        return Response.json([
-          {
-            id: "test-asset",
-            platforms: Object.fromEntries(
-              chains.map((chain) => [chain.platform, address({ n: 7 })]),
-            ),
-          },
-        ]);
+      if (url.hostname === "api.geckoterminal.com" && url.pathname.endsWith("/networks"))
+        return Response.json({
+          data: chains.map((chain) => ({
+            id: `gt-${chain.platform}`,
+            attributes: { coingecko_asset_platform_id: chain.platform },
+          })),
+        });
       if (url.pathname.endsWith("/asset_platforms"))
         return Response.json(
           chains.map((chain) => ({
@@ -458,21 +512,21 @@ describe("upstream ingestion", () => {
           ],
         });
       }
-      if (url.pathname.endsWith("/coins/markets"))
-        return Response.json([
-          {
-            id: "test-asset",
-            image: "https://example.com/test.png",
-            market_cap: 10,
-            last_updated: new Date(Date.now() - 60_000).toISOString(),
-          },
-          {
-            id: "test-native",
-            image: "https://example.com/native.png",
-            market_cap: 100,
-            last_updated: new Date().toISOString(),
-          },
-        ]);
+      if (url.hostname === "api.geckoterminal.com")
+        return Response.json({
+          data: [
+            {
+              attributes: {
+                address: address({ n: 7 }),
+                price_usd: "1.5",
+                market_cap_usd: "42",
+                image_url: "https://example.com/test.png",
+                total_reserve_in_usd: "1000000",
+              },
+            },
+          ],
+        });
+      if (url.hostname === "api.dexscreener.com") return Response.json([]);
       throw new Error(`Unexpected upstream request: ${url}`);
     });
     const imported = await syncCatalog({ env });
@@ -484,14 +538,15 @@ describe("upstream ingestion", () => {
     await env.DB.prepare(
       "UPDATE assets SET market_cap_usd = 999, market_cap_updated_at = ? WHERE id = ?",
     )
-      .bind(Date.now(), "test-asset")
+      .bind(Date.now() - 40 * 24 * 60 * 60 * 1000, `1:${address({ n: 7 })}`)
       .run();
     await seedMarketCaps({ env });
     const [token] = await getTokens({
       db: env.DB,
       tokens: [{ chainId: 1, address: address({ n: 7 }) }],
     });
-    expect(token?.market_cap_usd).toBe(999);
+    // The provider cap is newer than the stored value, so it wins.
+    expect(token?.market_cap_usd).toBe(42);
     expect(token?.symbol).toBe("");
     expect(token?.image_url).toBe("https://example.com/test.png");
     // A complete backfill is recorded, and repeat runs are idempotent.

@@ -17,6 +17,12 @@ export const searchSchema = z.strictObject({
   limit: z.coerce.number().int().min(1).max(100).default(20),
 });
 export const assetIdsSchema = z.array(z.string().min(1).max(250)).min(1).max(100);
+// Quote identity is `chainId:address`, matching the address-keyed providers. The
+// coordinator accepts a full bulk request and chunks internally for each provider.
+export const refreshIdsSchema = z
+  .array(z.string().regex(/^\d+:(?:native|0x[0-9a-f]{40})$/))
+  .min(1)
+  .max(100);
 
 const chainIdSchema = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 export const catalogReportSchema = z.object({
@@ -27,6 +33,7 @@ export const catalogReportSchema = z.object({
   pendingChains: z.number().int().nonnegative().default(0),
   pending: z.array(chainIdSchema).default([]),
   budgetExhausted: z.boolean().default(false),
+  freshChains: z.number().int().nonnegative().default(0),
   syncedAt: z.iso.datetime(),
   imported: z.array(
     z.object({
@@ -54,7 +61,6 @@ export const catalogReportSchema = z.object({
     })),
   ),
   missingNativeMetadata: z.array(chainIdSchema),
-  missingNativeAssetId: z.array(chainIdSchema),
 });
 
 export const tokenListSchema = z.object({
@@ -86,6 +92,14 @@ export const coinsSchema = z.array(
     platforms: z.record(z.string(), z.string().nullable()).optional(),
   }),
 );
+export const geckoTerminalNetworksSchema = z.object({
+  data: z.array(
+    z.object({
+      id: z.string(),
+      attributes: z.object({ coingecko_asset_platform_id: z.string().nullish() }).nullish(),
+    }),
+  ),
+});
 export const platformsSchema = z.array(
   z.object({
     id: z.string().max(250),

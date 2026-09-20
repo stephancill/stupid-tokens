@@ -26,7 +26,6 @@ export function discoverChains({
           id: platform.chain_identifier,
           name: platform.name,
           platform: platform.id,
-          nativeAssetId: platform.native_coin_id,
           native: nativeCurrencies.get(platform.chain_identifier) ?? null,
         },
       ];

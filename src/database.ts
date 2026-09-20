@@ -55,6 +55,22 @@ export async function searchTokens({
   return result.results;
 }
 
+export async function getChainSources({ db, chainIds }: { db: D1Database; chainIds: number[] }) {
+  const rows = await db
+    .prepare(
+      `SELECT c.id, c.platform_id, c.gt_network FROM chains c
+       WHERE c.id IN (SELECT value FROM json_each(?))`,
+    )
+    .bind(JSON.stringify(chainIds))
+    .all<{ id: number; platform_id: string; gt_network: string | null }>();
+  return new Map(
+    rows.results.map((row) => [
+      row.id,
+      { chainId: row.id, platformId: row.platform_id, geckoTerminalNetwork: row.gt_network },
+    ]),
+  );
+}
+
 export async function getQuotes({ db, ids }: { db: D1Database; ids: string[] }) {
   if (!ids.length) return [];
   return (
