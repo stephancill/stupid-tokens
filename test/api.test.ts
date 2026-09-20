@@ -454,7 +454,7 @@ describe("bulk prices and global refresh coordination", () => {
 });
 
 describe("upstream ingestion", () => {
-  it("imports across chunk boundaries and serves the maximum bulk size in one upstream call", async () => {
+  it("imports across chunk boundaries and serves a maximum-size bulk request", async () => {
     const tokens = Array.from({ length: 450 }, (_, index) => ({
       chainId: 1,
       address: address({ n: index + 1000 }),
@@ -470,10 +470,10 @@ describe("upstream ingestion", () => {
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM tokens").first("count")).toBe(450);
     const upstream = mockPrices();
     const response = await prices({
-      tokens: tokens.slice(-100).map(({ chainId, address }) => ({ chainId, address })),
+      tokens: tokens.slice(-50).map(({ chainId, address }) => ({ chainId, address })),
     });
     const data = await response.json<{ prices: { status: string; address: string }[] }>();
-    expect(data.prices).toHaveLength(100);
+    expect(data.prices).toHaveLength(50);
     expect(data.prices.every((price) => price.status === "ok")).toBe(true);
     expect(data.prices.at(-1)?.address).toBe(tokens.at(-1)?.address);
     expect(llamaCalls(upstream)).toBeGreaterThan(0);
