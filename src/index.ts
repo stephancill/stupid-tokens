@@ -1,7 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { bodyLimit } from "hono/body-limit";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { cached } from "./cache";
@@ -30,18 +29,6 @@ app.use(
     maxAge: 86400,
   }),
 );
-app.use(
-  "*",
-  bodyLimit({
-    maxSize: 32_768,
-    onError: (c) =>
-      c.json(
-        { error: { code: "body_too_large", message: "Request body must be at most 32 KiB" } },
-        413,
-      ),
-  }),
-);
-
 function validate<T>({ schema, value }: { schema: z.ZodType<T>; value: unknown }): T {
   const result = schema.safeParse(value);
   if (!result.success) throw new HTTPException(400, { message: z.prettifyError(result.error) });
@@ -86,7 +73,6 @@ app.get("/v1", (c) => {
       "GET /v1/search?q=usdc",
       "GET /v1/tokens/:chainId/:address",
       "GET /v1/prices?tokens=1:native",
-      "POST /v1/prices",
       "GET /health",
     ],
     attribution: { name: "Data provided by CoinGecko", url: "https://www.coingecko.com/en/api" },
@@ -294,24 +280,6 @@ app.get("/v1/prices", async (c) => {
   });
   c.header("Cache-Control", ttlSeconds > 0 ? `public, max-age=${ttlSeconds}` : "no-store");
   return c.json({ currency: "usd", prices });
-});
-
-app.post("/v1/prices", async (c) => {
-  if (!/^application\/json(?:\s*;|$)/i.test(c.req.header("content-type") ?? ""))
-    throw new HTTPException(415, { message: "Content-Type must be application/json" });
-  let body: unknown;
-  try {
-    body = await c.req.json();
-  } catch {
-    throw new HTTPException(400, { message: "Invalid JSON" });
-  }
-  const { tokens } = validate({ schema: priceRequestSchema, value: body });
-  // POST stays uncached: the body cannot form a cache key.
-  c.header("Cache-Control", "no-store");
-  return c.json({
-    currency: "usd",
-    prices: (await loadPrices({ env: c.env, ctx: c.executionCtx, tokens })).prices,
-  });
 });
 
 app.use("/admin/*", async (c, next) => {

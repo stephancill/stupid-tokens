@@ -105,7 +105,7 @@
       </tr>
       <tr>
         <td><code>GET /v1/prices</code></td>
-        <td>Cacheable bulk USD prices for up to 50 tokens. <code>POST</code> is also accepted.</td>
+        <td>Cacheable bulk USD prices for up to 50 tokens.</td>
       </tr>
       <tr>
         <td><code>GET /health</code></td>
@@ -145,29 +145,20 @@
 
     <h2>Bulk Prices</h2>
     <p>
-      Prefer the cacheable <code>GET</code> form: tokens are comma-separated as
-      <code>chainId:address</code>, and are sorted and deduplicated automatically. Non-canonical
-      requests receive a <code>308</code> redirect to the canonical URL.
+      Tokens are comma-separated as <code>chainId:address</code>, and are sorted and deduplicated
+      automatically. Non-canonical requests receive a <code>308</code> redirect to the canonical
+      URL.
     </p>
     <pre><code>curl 'https://tokens.stupidtech.net/v1/prices?tokens=1:native,8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913'</code></pre>
     <p>
       The response is sent with <code>Cache-Control: public, max-age=N</code>, where
       <code>N</code> is the shortest remaining freshness across the batch. It is never longer than
       five minutes; a batch that has already gone stale is cached only until a refresh becomes
-      possible, or served with <code>no-store</code> when a refresh is already allowed. A
-      <code>POST</code> form with a JSON body is also supported and is never cached.
+      possible, or served with <code>no-store</code> when a refresh is already allowed.
     </p>
-    <pre><code>curl 'https://tokens.stupidtech.net/v1/prices' \
-  -H 'Content-Type: application/json' \
-  --data '{
-    "tokens": [
-      { "chainId": 1, "address": "native" },
-      { "chainId": 8453, "address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" }
-    ]
-  }'</code></pre>
     <p>
-      One result per input, in input order, including duplicates. A valid batch returns HTTP 200
-      even when individual tokens are unavailable.
+      One result per requested token, in canonical order. A valid batch returns HTTP 200 even when
+      individual tokens are unavailable.
     </p>
     <pre><code>{
   "currency": "usd",
@@ -232,8 +223,8 @@
 
     <h2>Limits</h2>
     <p>
-      Up to 50 tokens per price request, 100 search results per request, and a 32 KiB request body.
-      The service is free and unauthenticated, so please cache responses and avoid tight polling.
+      Up to 50 tokens per price request and 100 search results per request. The service is free and
+      unauthenticated, so please cache responses and avoid tight polling.
     </p>
 
     <p>

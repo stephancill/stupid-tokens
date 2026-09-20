@@ -173,3 +173,10 @@
 - **A throttled source was re-probed on every batch.** GeckoTerminal returns 429 to Cloudflare egress, so each 60-asset batch paid a failing request (with retries and backoff) before falling back to DexScreener. Added a per-run `SourceGate` circuit breaker: once a gated source reports throttling it is skipped for the remainder of that invocation, while ungated sources keep serving. Only GeckoTerminal is gated, so the primary price source and the last remaining fallback can never be silenced by a sibling's error.
 - `trySources` now counts _attempted_ sources rather than all loaders when deciding whether every source failed, so skipping a gated source cannot be mistaken for total upstream failure.
 - Added tests covering the gate (a throttled GeckoTerminal is dropped for the rest of a run while fallback caps still land) and progress (an unresolvable cap records its attempt, is not re-selected immediately, and becomes due again once the check window lapses).
+
+## GET-only bulk prices
+
+- Removed `POST /v1/prices`. Bulk prices are served only from the canonical, cacheable `GET /v1/prices?tokens=...`, so the response can always sit in front of the Worker. This is a breaking change for callers that used the JSON body; the `POST` form was never cacheable because a request body cannot form a cache key.
+- Removed the now-unused `bodyLimit` middleware and the 32 KiB body limit, since no public endpoint accepts a request body. Also removed the `415` content-type check and the `413` body-too-large response.
+- Because the only request is canonical, the response has one entry per canonical token in canonical order; the previous "one entry per input, including duplicates" behaviour only existed for the body form.
+- Updated the `GET /v1` endpoint index, the landing page, `docs/api.md`, and `docs/architecture.md`, and refactored the bulk-price tests onto the GET form.

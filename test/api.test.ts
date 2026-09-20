@@ -100,14 +100,11 @@ async function seed() {
 }
 
 async function prices({ tokens }: { tokens: { chainId: number; address: string }[] }) {
-  return request({
-    path: "/v1/prices",
-    init: {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ tokens }),
-    },
-  });
+  // The GET form is canonical: sorted and deduplicated. Mirrors the Worker's `tokenKey` ordering.
+  const canonical = [...new Set(tokens.map((token) => `${token.chainId}:${token.address}`))]
+    .sort()
+    .join(",");
+  return request({ path: `/v1/prices?tokens=${canonical}` });
 }
 
 async function pricesGet({ tokens }: { tokens: string }) {
@@ -244,13 +241,14 @@ describe("catalog and search", () => {
 });
 
 describe("bulk prices and global refresh coordination", () => {
-  it("shares a batch across concurrent requests and mapped chain deployments, preserving input order and duplicates", async () => {
+  it("shares a batch across concurrent requests and mapped chain deployments", async () => {
     await seed();
     const upstream = mockPrices({ delay: 100 });
     const tokens = [
       { chainId: 1, address: address({ n: 1 }) },
       { chainId: 8453, address: address({ n: 4 }) },
     ];
+    // Duplicate inputs collapse into the canonical, sorted request.
     const first = prices({ tokens: [...tokens, tokens[0]!] });
     const second = prices({ tokens: [{ chainId: 1, address: address({ n: 2 }) }] });
     // Arrive after D1's refresh reservation exists, while the upstream is still in flight.
@@ -261,7 +259,7 @@ describe("bulk prices and global refresh coordination", () => {
     const data = await responses[0]!.json<{
       prices: { status: string; chainId: number; priceUsd: string }[];
     }>();
-    expect(data.prices.map((price) => price.chainId)).toEqual([1, 8453, 1]);
+    expect(data.prices.map((price) => price.chainId)).toEqual([1, 8453]);
     expect(data.prices.every((price) => price.status === "ok")).toBe(true);
     expect(data.prices[0]?.priceUsd).toBe("0.00000012");
     const joined = await responses[2]!.json<{ prices: { status: string }[] }>();
@@ -481,7 +479,7 @@ describe("bulk prices and global refresh coordination", () => {
     expect(maxAge).toBeLessThanOrEqual(300);
   });
 
-  it("validates bulk size, addresses, JSON, and content type", async () => {
+  it("validates bulk size and addresses", async () => {
     await seed();
     const upstream = mockPrices();
     expect((await prices({ tokens: [] })).status).toBe(400);
@@ -489,27 +487,13 @@ describe("bulk prices and global refresh coordination", () => {
     expect(
       (
         await prices({
-          tokens: Array.from({ length: 51 }, () => ({ chainId: 1, address: "native" })),
+          tokens: Array.from({ length: 51 }, (_, index) => ({
+            chainId: 1,
+            address: address({ n: index }),
+          })),
         })
       ).status,
     ).toBe(400);
-    const malformed = await request({
-      path: "/v1/prices",
-      init: {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: "{",
-      },
-    });
-    expect(malformed.status).toBe(400);
-    const wrongType = await request({
-      path: "/v1/prices",
-      init: {
-        method: "POST",
-        body: "{}",
-      },
-    });
-    expect(wrongType.status).toBe(415);
     expect(upstream).not.toHaveBeenCalled();
   });
 });

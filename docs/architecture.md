@@ -23,7 +23,7 @@ Search uses the latest stored market caps, with null values last and chain/addre
 ## Runtime
 
 - Hono Worker: validation, CORS, public endpoints, bounded edge caching.
-- Bulk prices are served from a canonical `GET` so responses can be cached in front of the Worker. The lifetime is the shortest remaining freshness across the batch, bounded by both the refresh interval and the source timestamp, so a cached response can never outlive the five-minute freshness limit. A `POST` form remains for callers that cannot build a URL, and is never cached.
+- Bulk prices are served from a canonical `GET` so responses can be cached in front of the Worker. The lifetime is the shortest remaining freshness across the batch, bounded by both the refresh interval and the source timestamp, so a cached response can never outlive the five-minute freshness limit. Non-canonical requests are redirected (`308`) to the canonical URL. There is no `POST` form, because a request body cannot form a cache key.
 - D1: chains, assets, deployment metadata, FTS5 trigram search, quotes, sync state.
 - One SQLite-backed Durable Object: micro-batches cache misses, shares in-flight work, persists per-asset refresh reservations and provider budgets, and writes results back to D1. The object handles refresh traffic; cached price reads use D1 or the edge cache.
 - Daily Cron Trigger: refreshes metadata only. Prices have no polling schedule.

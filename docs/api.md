@@ -56,7 +56,7 @@ Values above are illustrative. Image URLs and market caps may be null. CoinGecko
 
 ## GET /v1/prices
 
-The preferred, cacheable form. `tokens` is a comma-separated list of `chainId:address` values, up to 50.
+The cacheable form. `tokens` is a comma-separated list of `chainId:address` values, up to 50.
 
 ```sh
 curl 'http://localhost:8787/v1/prices?tokens=1:native,8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913'
@@ -65,16 +65,6 @@ curl 'http://localhost:8787/v1/prices?tokens=1:native,8453:0x833589fcd6edb6e08f4
 Tokens are sorted and deduplicated before the response is formed, so ordering and casing cannot fragment caches. A request that is not already canonical receives a `308` redirect to the canonical URL, which is itself cacheable.
 
 Responses are sent with `Cache-Control: public, max-age=N`, where `N` is the shortest remaining freshness across the batch: the earlier of the next permitted refresh and the source timestamp plus 300 seconds. It is capped at 300. If the computed lifetime is zero or less the response is sent with `no-store` instead. A `stale` batch is cached only until a refresh becomes possible, because nothing better can be produced before then.
-
-## POST /v1/prices
-
-Requires `Content-Type: application/json`. Accepts 1–50 tokens across any supported chains, with a maximum body size of 32 KiB. Identical semantics to the GET form, except that the response is always `no-store`, because a request body cannot form a cache key.
-
-```sh
-curl 'http://localhost:8787/v1/prices' \
-  -H 'Content-Type: application/json' \
-  --data '{"tokens":[{"chainId":1,"address":"native"},{"chainId":8453,"address":"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"}]}'
-```
 
 ```json
 {
@@ -95,7 +85,7 @@ curl 'http://localhost:8787/v1/prices' \
 }
 ```
 
-The response has one entry per input, in input order, including duplicates. A valid batch receives HTTP 200 even when individual items are unavailable:
+The response has one entry per canonical token, in canonical order. A valid batch receives HTTP 200 even when individual items are unavailable:
 
 | Status              | Meaning                                                                          |
 | ------------------- | -------------------------------------------------------------------------------- |
@@ -110,14 +100,14 @@ Only `ok` carries a non-null price. A recent fetch can contain old source data. 
 
 The rolling cooldown applies to attempts, including failures, and is shared across callers and mapped deployments. Concurrent requests wait on the same in-flight work. Failed items do not silently reuse old prices. Budget checks that prevent an upstream attempt can be retried earlier, as indicated by `nextRefreshAt`.
 
-Responses use `Cache-Control: no-store`; the Worker internally caches raw per-asset quotes and evaluates source freshness on every response. Search and metadata use `no-cache` downstream to prevent extending their internal edge-cache lifetime.
+Search results are edge-cached for up to 60 seconds, and token metadata for 60 seconds with `stale-while-revalidate=3600`. The Worker caches raw per-asset quotes internally and evaluates source freshness on every response.
 
 ## Errors and health
 
-- HTTP 400: invalid request data or malformed JSON.
+- HTTP 400: invalid request data.
+- HTTP 401: operator request without a valid bearer token.
 - HTTP 404: unknown endpoint or missing single-token metadata.
-- HTTP 413: body too large.
-- HTTP 415: price request is not JSON.
+- HTTP 409: a concurrent operator run already holds the import lock.
 - HTTP 503: catalog not initialized or service/storage failure.
 
 Error responses have `{ "error": { "code": "...", "message": "..." } }`.
