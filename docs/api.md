@@ -52,7 +52,7 @@ Returns metadata, or HTTP 404 if the deployment is absent from the catalog:
 }
 ```
 
-Values above are illustrative. Image URLs and market caps may be null. A source-provided empty symbol is preserved rather than invented. Metadata lookup returns the stored market cap and does not trigger a price refresh.
+Values above are illustrative. Image URLs and market caps may be null. CoinGecko-hosted images use the largest available size (250x250) rather than the 25x25 thumbnail embedded in token lists. A source-provided empty symbol is preserved rather than invented. Metadata lookup returns the stored market cap and does not trigger a price refresh.
 
 ## GET /v1/prices
 

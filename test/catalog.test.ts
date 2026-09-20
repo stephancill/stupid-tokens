@@ -250,6 +250,44 @@ it("preserves failed-chain data, discards malformed entries, and reports degrade
   );
 });
 
+it("upgrades CoinGecko thumbnail logos to the large variant without touching other hosts", async () => {
+  const base = list({ chainId: 146 }).tokens[0]!;
+  upstream({
+    platforms: [platform({ id: "logos", chainId: 146 })],
+    responses: {
+      logos: () =>
+        Response.json({
+          ...list({ chainId: 146 }),
+          tokens: [
+            {
+              ...base,
+              logoURI: "https://assets.coingecko.com/coins/images/6319/thumb/USDC.png?1769615602",
+            },
+            {
+              ...base,
+              address: address({ n: 2 }),
+              logoURI: "https://example.com/custom/thumb/logo.png",
+            },
+          ],
+        }),
+    },
+  });
+  const report = await syncCatalog({ env });
+  expect(report.status).toBe("complete");
+  const tokens = await getTokens({
+    db: env.DB,
+    tokens: [
+      { chainId: 146, address: tokenAddress },
+      { chainId: 146, address: address({ n: 2 }) },
+    ],
+  });
+  const byAddress = new Map(tokens.map((token) => [token.address, token.image_url]));
+  expect(byAddress.get(tokenAddress)).toBe(
+    "https://assets.coingecko.com/coins/images/6319/large/USDC.png?1769615602",
+  );
+  expect(byAddress.get(address({ n: 2 }))).toBe("https://example.com/custom/thumb/logo.png");
+});
+
 it("sends the provider key header only when a key is configured", async () => {
   const chains = [{ id: 1, name: "Ethereum", platform: "ethereum" }];
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {

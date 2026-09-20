@@ -144,3 +144,12 @@
 - Catalog holds 26,485 tokens across 187 chains.
 - Market-cap coverage is being filled by the resumable backfill, which is run repeatedly until it reports `complete: true`. GeckoTerminal throttles Cloudflare egress addresses, so caps largely come from DexScreener in production; running the backfill from a non-Cloudflare address lets GeckoTerminal contribute caps and images.
 - Price serving verified end to end against live sources: DefiLlama supplied prices, DexScreener supplied market caps, and native currencies priced correctly on five chains.
+
+## Logo resolution
+
+- Investigated low-resolution `imageUrl` values in API responses. The token-list import stored CoinGecko's `logoURI` verbatim, and every one of the 5,851 logos in the Ethereum list (and 100% of sampled entries across lists) uses the 25x25 `/thumb/` variant on `assets.coingecko.com`. The 250x250 `/large/` variant is the same asset at the same URL with a different size segment, so it costs no extra upstream request.
+- GeckoTerminal already returns `/large/`, but its images only reach the API as a fallback when the token-list image is the `tokens.image_url` null case, so the low-resolution thumbnail won for essentially every imported token.
+- Added `normalizeImageUrl`, which rewrites `/thumb/` to `/large/` only for the `assets.coingecko.com` and `coin-images.coingecko.com` hosts, leaving unrelated hosts untouched. It is applied to token-list logos during import and to GeckoTerminal images when quotes are built.
+- Added migration `0005_normalize_image_size.sql`, which rewrites already-stored `/thumb/` URLs in `tokens.image_url` and `assets.image_url` so existing rows are fixed without waiting for a full re-sync. The normalized import also changes the per-chain content hash, so the next sync re-imports lists and reconciles any rows the migration missed.
+- Verified the three size variants live for USDC: `/thumb/` is 25x25 (983 B), `/small/` is 50x50 (2.3 KB), and `/large/` is 250x250 (19 KB); a random sample of twelve `/large/` rewrites all returned HTTP 200.
+- Added a Workers-runtime test asserting that a CoinGecko `/thumb/` logo is stored as `/large/` and that a non-CoinGecko host containing `/thumb/` is left unchanged.

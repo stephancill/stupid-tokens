@@ -28,6 +28,23 @@ const NATIVE = "native";
 // A DEX price from a thin pool is trivially manipulated, so require real liquidity.
 export const MIN_LIQUIDITY_USD = 10_000;
 
+// CoinGecko serves each asset image at preset sizes and token lists embed the 25x25
+// `/thumb/` variant, which is too small for UI use. The identical asset is served at
+// `/large/` (250x250) with no extra upstream request, so upgrade the size in the stored
+// URL. Only CoinGecko image hosts are rewritten; unrelated hosts pass through untouched.
+const COINGECKO_IMAGE_HOSTS = new Set(["assets.coingecko.com", "coin-images.coingecko.com"]);
+export function normalizeImageUrl({ url }: { url: string | null }): string | null {
+  if (!url) return null;
+  let hostname: string;
+  try {
+    hostname = new URL(url).hostname;
+  } catch {
+    return url;
+  }
+  if (!COINGECKO_IMAGE_HOSTS.has(hostname) || !url.includes("/thumb/")) return url;
+  return url.replace("/thumb/", "/large/");
+}
+
 const DEFILLAMA_ALIASES: Record<string, string> = {
   "binance-smart-chain": "bsc",
   "polygon-pos": "polygon",
@@ -207,7 +224,7 @@ export async function geckoTerminalQuotes({
           priceUpdatedAt: Date.now(),
           marketCapUsd: marketCap,
           marketCapUpdatedAt: Date.now(),
-          imageUrl: attributes.image_url ?? null,
+          imageUrl: normalizeImageUrl({ url: attributes.image_url ?? null }),
           source: "geckoterminal",
         });
       }

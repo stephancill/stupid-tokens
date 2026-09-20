@@ -5,6 +5,7 @@ import {
   dexscreenerQuotes,
   geckoTerminalNetworks,
   geckoTerminalQuotes,
+  normalizeImageUrl,
   trySources,
 } from "./providers";
 import { HTTPException } from "hono/http-exception";
@@ -72,7 +73,7 @@ function parseTokens({ chainId, list }: { chainId: number; list: TokenListToken[
       name: token.name,
       symbol: token.symbol ?? "",
       decimals: token.decimals ?? 18,
-      imageUrl: token.logoURI ?? null,
+      imageUrl: normalizeImageUrl({ url: token.logoURI ?? null }),
     });
   }
   return { tokens: [...byAddress.values()], discarded };
