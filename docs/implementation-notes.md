@@ -92,3 +92,10 @@
 - Found by probing from Cloudflare's network that GeckoTerminal returns HTTP 429 to Workers while DefiLlama and DexScreener return 200. Because the three sources were awaited in a single array literal, a GeckoTerminal 429 aborted the whole refresh and discarded the successful DefiLlama price, so no price was ever served.
 - Added `trySources`, which isolates each provider: a throttled or broken source contributes nothing and is logged, while the remaining sources still produce a result. A refresh is only treated as an upstream failure when every source fails, which preserves the existing backoff behaviour.
 - Applied the same isolation to the market-cap path, so caps can still come from DexScreener when GeckoTerminal is throttled.
+
+## Freshness-aware source merge
+
+- Verified against a real wallet (82 tokens across 7 chains, balances sourced from Alchemy because Dune Sim DNS was unavailable). Native currencies priced correctly and matched Alchemy closely (ETH 2632.96 vs 2637.92, AVAX 11.161 vs 11.166). All 68 unpriced tokens were airdrop spam that Alchemy could not price either, so there were no false negatives.
+- That run exposed a merge defect: YFI is liquid (Alchemy 2197) but returned `stale`, because the merge took the first source with any price and DefiLlama's timestamp had lagged past the freshness limit, shadowing fresher DEX prices.
+- `mergeQuotes` now prefers the highest-priority source whose price is still within the freshness window, falling back to any available price (which the response then reports as `stale`). A missing timestamp is treated as fresh because freshness is then unknown. Market cap and image still prefer the first source that provides them.
+- Added a runtime test proving a fresh lower-priority DEX price supersedes a stale primary price, and kept a test that withholds a price when every source is stale.

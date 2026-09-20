@@ -118,12 +118,14 @@ function mockPrices({
   age = 0,
   price = 0.00000012,
   marketCap = 1234567,
+  geckoPrice = undefined as string | null | undefined,
 }: {
   delay?: number;
   status?: number;
   age?: number;
   price?: number;
   marketCap?: number;
+  geckoPrice?: string | null;
 } = {}) {
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
@@ -150,7 +152,7 @@ function mockPrices({
         data: addresses.filter(Boolean).map((address) => ({
           attributes: {
             address,
-            price_usd: String(price),
+            price_usd: geckoPrice === undefined ? String(price) : geckoPrice,
             market_cap_usd: String(marketCap),
             image_url: "https://example.com/token.png",
             total_reserve_in_usd: "1000000",
@@ -384,7 +386,8 @@ describe("bulk prices and global refresh coordination", () => {
     )
       .bind(Date.now(), "1:0x0000000000000000000000000000000000000001")
       .run();
-    const upstream = mockPrices({ age: REFRESH_MS + 10_000 });
+    // With every source stale, the price is withheld rather than served beyond the limit.
+    const upstream = mockPrices({ age: REFRESH_MS + 10_000, geckoPrice: null });
     const response = await prices({
       tokens: [
         { chainId: 1, address: address({ n: 1 }) },
@@ -403,6 +406,17 @@ describe("bulk prices and global refresh coordination", () => {
         .bind("1:0x0000000000000000000000000000000000000001")
         .first("market_cap_usd"),
     ).toBe(1234567);
+    expect(llamaCalls(upstream)).toBe(1);
+  });
+
+  it("prefers a fresher lower-priority source over a stale primary price", async () => {
+    await seed();
+    const upstream = mockPrices({ age: REFRESH_MS + 10_000, geckoPrice: "0.5" });
+    const response = await prices({ tokens: [{ chainId: 1, address: address({ n: 1 }) }] });
+    const data = await response.json<{ prices: { status: string; priceUsd: string | null }[] }>();
+    // DefiLlama's timestamp is beyond the freshness limit, so the fresh DEX price is used.
+    expect(data.prices[0]?.status).toBe("ok");
+    expect(data.prices[0]?.priceUsd).toBe("0.5");
     expect(llamaCalls(upstream)).toBe(1);
   });
 

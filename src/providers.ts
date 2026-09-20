@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { fetchJson } from "./coingecko";
 import { geckoTerminalNetworksSchema } from "./validation";
+import { REFRESH_MS } from "./types";
 
 // Address-keyed sources, so identity stays chainId + address and no provider coin-ID
 // mapping is needed. DefiLlama is aggregated and robust for majors; GeckoTerminal
@@ -314,30 +315,40 @@ export async function trySources({
     }
   }
   if (failures === loaders.length && lastError) throw lastError;
-  return mergeQuotes({ sources });
+  return mergeQuotes({ sources, now: Date.now() });
 }
 
-// Merge sources in priority order: the first provider with a usable value wins per field.
-export function mergeQuotes({ sources }: { sources: Map<string, ProviderQuote>[] }) {
+// Merge sources in priority order, but prefer a source whose price is still fresh. A lagging
+// timestamp from a higher-priority source must not shadow a fresher one. A missing timestamp
+// is treated as fresh because freshness is then unknown.
+export function mergeQuotes({
+  sources,
+  now,
+}: {
+  sources: Map<string, ProviderQuote>[];
+  now: number;
+}) {
   const merged = new Map<string, ProviderQuote>();
-  for (const source of sources) {
-    for (const [id, quote] of source) {
-      const current = merged.get(id);
-      if (!current) {
-        merged.set(id, quote);
-        continue;
-      }
-      merged.set(id, {
-        priceUsd: current.priceUsd ?? quote.priceUsd,
-        priceUpdatedAt: current.priceUsd ? current.priceUpdatedAt : quote.priceUpdatedAt,
-        marketCapUsd: current.marketCapUsd ?? quote.marketCapUsd,
-        marketCapUpdatedAt: current.marketCapUsd
-          ? current.marketCapUpdatedAt
-          : quote.marketCapUpdatedAt,
-        imageUrl: current.imageUrl ?? quote.imageUrl,
-        source: current.priceUsd ? current.source : quote.source,
-      });
-    }
+  const ids = new Set(sources.flatMap((source) => [...source.keys()]));
+  for (const id of ids) {
+    const candidates = sources.flatMap((source) => {
+      const quote = source.get(id);
+      return quote ? [quote] : [];
+    });
+    if (!candidates.length) continue;
+    const isFresh = (quote: ProviderQuote) =>
+      quote.priceUpdatedAt === null || now - quote.priceUpdatedAt <= REFRESH_MS;
+    const priced = candidates.filter((quote) => quote.priceUsd !== null);
+    const chosen = priced.find(isFresh) ?? priced[0] ?? candidates[0]!;
+    const cap = candidates.find((quote) => quote.marketCapUsd !== null);
+    merged.set(id, {
+      priceUsd: chosen.priceUsd,
+      priceUpdatedAt: chosen.priceUsd ? chosen.priceUpdatedAt : null,
+      marketCapUsd: cap?.marketCapUsd ?? null,
+      marketCapUpdatedAt: cap?.marketCapUpdatedAt ?? null,
+      imageUrl: candidates.find((quote) => quote.imageUrl !== null)?.imageUrl ?? null,
+      source: chosen.source,
+    });
   }
   return merged;
 }
