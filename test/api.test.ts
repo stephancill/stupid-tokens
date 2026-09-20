@@ -110,6 +110,10 @@ async function prices({ tokens }: { tokens: { chainId: number; address: string }
   });
 }
 
+async function pricesGet({ tokens }: { tokens: string }) {
+  return request({ path: `/v1/prices?tokens=${tokens}` });
+}
+
 // Prices now come from address-keyed providers. DefiLlama supplies the price; GeckoTerminal
 // supplies market caps; DexScreener is the fallback.
 function mockPrices({
@@ -418,6 +422,63 @@ describe("bulk prices and global refresh coordination", () => {
     expect(data.prices[0]?.status).toBe("ok");
     expect(data.prices[0]?.priceUsd).toBe("0.5");
     expect(llamaCalls(upstream)).toBe(1);
+  });
+
+  it("serves a cacheable canonical GET and redirects non-canonical token lists", async () => {
+    await seed();
+    const upstream = mockPrices();
+    const a = `1:${address({ n: 1 })}`;
+    const b = `1:${address({ n: 2 })}`;
+
+    // Unsorted, duplicated input redirects to the canonical form so the cache cannot fragment.
+    const redirect = await pricesGet({ tokens: `${b},${a},${b}` });
+    expect(redirect.status).toBe(308);
+    expect(redirect.headers.get("location")).toBe(`/v1/prices?tokens=${a},${b}`);
+    expect(redirect.headers.get("cache-control")).toContain("max-age=86400");
+
+    const response = await pricesGet({ tokens: `${a},${b}` });
+    expect(response.status).toBe(200);
+    const cacheControl = response.headers.get("cache-control") ?? "";
+    expect(cacheControl).toContain("public");
+    const maxAge = Number(/max-age=(\d+)/.exec(cacheControl)?.[1] ?? 0);
+    // Bounded by the five-minute refresh interval.
+    expect(maxAge).toBeGreaterThan(0);
+    expect(maxAge).toBeLessThanOrEqual(300);
+
+    const data = await response.json<{ prices: { address: string; status: string }[] }>();
+    expect(data.prices.map((price) => price.address)).toEqual([
+      address({ n: 1 }),
+      address({ n: 2 }),
+    ]);
+    expect(data.prices.every((price) => price.status === "ok")).toBe(true);
+    // One shared refresh for the whole batch.
+    expect(llamaCalls(upstream)).toBe(1);
+  });
+
+  it("bounds max-age by the source freshness window, not just the refresh interval", async () => {
+    await seed();
+    // A price whose source timestamp is already 200s old may only be cached for the 100s
+    // remaining, so a cached response can never outlive the five-minute freshness limit.
+    mockPrices({ age: 200_000, geckoPrice: null });
+    const response = await pricesGet({ tokens: `1:${address({ n: 1 })}` });
+    expect(response.status).toBe(200);
+    const data = await response.json<{ prices: { status: string }[] }>();
+    expect(data.prices[0]?.status).toBe("ok");
+    const maxAge = Number(/max-age=(\d+)/.exec(response.headers.get("cache-control") ?? "")?.[1]);
+    expect(maxAge).toBeGreaterThan(80);
+    expect(maxAge).toBeLessThan(120);
+  });
+
+  it("caches a stale answer only until a refresh becomes possible", async () => {
+    await seed();
+    mockPrices({ age: REFRESH_MS + 10_000, geckoPrice: null });
+    const response = await pricesGet({ tokens: `1:${address({ n: 1 })}` });
+    const data = await response.json<{ prices: { status: string }[] }>();
+    expect(data.prices[0]?.status).toBe("stale");
+    // Nothing better can be produced before the cooldown lapses, so caching until then is safe.
+    const maxAge = Number(/max-age=(\d+)/.exec(response.headers.get("cache-control") ?? "")?.[1]);
+    expect(maxAge).toBeGreaterThan(0);
+    expect(maxAge).toBeLessThanOrEqual(300);
   });
 
   it("validates bulk size, addresses, JSON, and content type", async () => {

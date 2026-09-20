@@ -4,10 +4,18 @@ import { cors } from "hono/cors";
 import { bodyLimit } from "hono/body-limit";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import { cacheKey, cached } from "./cache";
+import { cached } from "./cache";
 import { refreshMarketCaps, seedMarketCaps, syncCatalog } from "./catalog";
 import { getQuotes, getTokens, searchTokens, setState, stateValue } from "./database";
-import { priceResponse, tokenKey, tokenResponse, type Env, type QuoteRow } from "./types";
+import {
+  priceResponse,
+  REFRESH_MS,
+  tokenKey,
+  tokenResponse,
+  type Env,
+  type QuoteRow,
+  type TokenId,
+} from "./types";
 import { catalogReportSchema, priceRequestSchema, searchSchema, tokenIdSchema } from "./validation";
 
 export { PriceCoordinator } from "./prices";
@@ -189,6 +197,98 @@ app.get("/v1/tokens/:chainId/:address", async (c) => {
   return c.json(data);
 });
 
+// Shared price assembly. Bulk reads use one batched D1 query rather than a per-token cache
+// fan-out, and only tokens whose cooldown has lapsed reach the refresh coordinator.
+async function loadPrices({
+  env,
+  ctx,
+  tokens,
+}: {
+  env: Env;
+  ctx: Pick<ExecutionContext, "waitUntil">;
+  tokens: TokenId[];
+}) {
+  const unique = [...new Map(tokens.map((token) => [tokenKey(token), token])).values()].sort(
+    (a, b) => tokenKey(a).localeCompare(tokenKey(b)),
+  );
+  const metadata = await cached({
+    namespace: "price-identities",
+    key: unique,
+    ttl: 300,
+    ctx,
+    load: () => getTokens({ db: env.DB, tokens: unique }),
+  });
+  const byToken = new Map(
+    metadata.map((row) => [tokenKey({ chainId: row.chain_id, address: row.address }), row]),
+  );
+  const ids = [...new Set(metadata.flatMap((row) => (row.asset_id ? [row.asset_id] : [])))];
+  const now = Date.now();
+  const quotes = new Map<string, QuoteRow>();
+  const stored = await getQuotes({ db: env.DB, ids });
+  const refresh: string[] = [];
+  for (const quote of stored) {
+    if (quote.refresh_after <= now || quote.price_status === "refreshing") refresh.push(quote.id);
+    else quotes.set(quote.id, quote);
+  }
+  if (refresh.length) {
+    const results = await env.PRICES.getByName("coingecko").getPrices({ ids: refresh });
+    for (const quote of results) quotes.set(quote.id, quote);
+  }
+  const prices = tokens.map((token) => {
+    const row = byToken.get(tokenKey(token));
+    const quote = row?.asset_id ? quotes.get(row.asset_id) : undefined;
+    const result = priceResponse({ token, quote, now });
+    return row ? result : { ...result, status: "not_found" };
+  });
+  return { prices, ttlSeconds: responseTtl({ prices, now }) };
+}
+
+// How long the whole response may be cached. A batch is only cacheable while every token in it
+// is still fresh, so the shortest remaining lifetime wins. Capped at the refresh interval.
+function responseTtl({ prices, now }: { prices: ReturnType<typeof priceResponse>[]; now: number }) {
+  const ttlFor = (price: (typeof prices)[number]) => {
+    if (price.status === "not_found") return 300;
+    const refreshAt = price.nextRefreshAt ? Date.parse(price.nextRefreshAt) : now;
+    const sourceAt = price.priceUpdatedAt ? Date.parse(price.priceUpdatedAt) : null;
+    const limit =
+      price.status === "ok" && sourceAt !== null
+        ? Math.min(refreshAt, sourceAt + REFRESH_MS)
+        : refreshAt;
+    return Math.floor((limit - now) / 1000);
+  };
+  return Math.max(0, Math.min(REFRESH_MS / 1000, ...prices.map(ttlFor)));
+}
+
+function parseTokenId({ value }: { value: string }): { chainId: number; address: string } {
+  const separator = value.indexOf(":");
+  if (separator === -1)
+    throw new HTTPException(400, { message: `Expected chainId:address, received "${value}"` });
+  return { chainId: Number(value.slice(0, separator)), address: value.slice(separator + 1) };
+}
+
+// Cacheable form: GET with a canonical, sorted, deduplicated token list. Non-canonical requests
+// are redirected so ordering and casing cannot fragment the cache.
+app.get("/v1/prices", async (c) => {
+  const raw = c.req.query("tokens") ?? "";
+  const parsed = raw
+    .split(",")
+    .filter(Boolean)
+    .map((value) => parseTokenId({ value }));
+  const { tokens } = validate({ schema: priceRequestSchema, value: { tokens: parsed } });
+  const canonical = [...new Set(tokens.map(tokenKey))].sort().join(",");
+  if (raw !== canonical) {
+    c.header("Cache-Control", "public, max-age=86400");
+    return c.redirect(`/v1/prices?tokens=${canonical}`, 308);
+  }
+  const { prices, ttlSeconds } = await loadPrices({
+    env: c.env,
+    ctx: c.executionCtx,
+    tokens,
+  });
+  c.header("Cache-Control", ttlSeconds > 0 ? `public, max-age=${ttlSeconds}` : "no-store");
+  return c.json({ currency: "usd", prices });
+});
+
 app.post("/v1/prices", async (c) => {
   if (!/^application\/json(?:\s*;|$)/i.test(c.req.header("content-type") ?? ""))
     throw new HTTPException(415, { message: "Content-Type must be application/json" });
@@ -199,68 +299,11 @@ app.post("/v1/prices", async (c) => {
     throw new HTTPException(400, { message: "Invalid JSON" });
   }
   const { tokens } = validate({ schema: priceRequestSchema, value: body });
-  const unique = [...new Map(tokens.map((token) => [tokenKey(token), token])).values()].sort(
-    (a, b) => tokenKey(a).localeCompare(tokenKey(b)),
-  );
-  const metadata = await cached({
-    namespace: "price-identities",
-    key: unique,
-    ttl: 300,
-    ctx: c.executionCtx,
-    load: () => getTokens({ db: c.env.DB, tokens: unique }),
-  });
-  const byToken = new Map(
-    metadata.map((row) => [tokenKey({ chainId: row.chain_id, address: row.address }), row]),
-  );
-  const ids = [...new Set(metadata.flatMap((row) => (row.asset_id ? [row.asset_id] : [])))];
-  const quotes = new Map<string, QuoteRow>();
-  const keys = new Map<string, Request>();
-  const misses: string[] = [];
-  await Promise.all(
-    ids.map(async (id) => {
-      const key = await cacheKey({ namespace: "quote", value: id });
-      keys.set(id, key);
-      const hit = await caches.default.match(key);
-      const row = hit ? await hit.json<QuoteRow>() : null;
-      if (row && row.refresh_after > Date.now() && row.price_status !== "refreshing")
-        quotes.set(id, row);
-      else misses.push(id);
-    }),
-  );
-  const stored = await getQuotes({ db: c.env.DB, ids: misses });
-  const refresh: string[] = [];
-  for (const quote of stored) {
-    if (quote.refresh_after <= Date.now() || quote.price_status === "refreshing")
-      refresh.push(quote.id);
-    else quotes.set(quote.id, quote);
-  }
-  if (refresh.length) {
-    const results = await c.env.PRICES.getByName("coingecko").getPrices({ ids: refresh });
-    for (const quote of results) quotes.set(quote.id, quote);
-  }
-  for (const id of misses) {
-    const quote = quotes.get(id);
-    const key = keys.get(id);
-    if (!quote || !key || quote.price_status === "refreshing") continue;
-    const ttl = Math.min(300, Math.floor((quote.refresh_after - Date.now()) / 1000));
-    if (ttl > 0)
-      c.executionCtx.waitUntil(
-        caches.default.put(
-          key,
-          Response.json(quote, { headers: { "cache-control": `public, max-age=${ttl}` } }),
-        ),
-      );
-  }
-  const now = Date.now();
+  // POST stays uncached: the body cannot form a cache key.
   c.header("Cache-Control", "no-store");
   return c.json({
     currency: "usd",
-    prices: tokens.map((token) => {
-      const metadata = byToken.get(tokenKey(token));
-      const quote = metadata?.asset_id ? quotes.get(metadata.asset_id) : undefined;
-      const result = priceResponse({ token, quote, now });
-      return metadata ? result : { ...result, status: "not_found" };
-    }),
+    prices: (await loadPrices({ env: c.env, ctx: c.executionCtx, tokens })).prices,
   });
 });
 

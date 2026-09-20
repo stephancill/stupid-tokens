@@ -54,9 +54,21 @@ Returns metadata, or HTTP 404 if the deployment is absent from the catalog:
 
 Values above are illustrative. Image URLs and market caps may be null. A source-provided empty symbol is preserved rather than invented. Metadata lookup returns the stored market cap and does not trigger a price refresh.
 
+## GET /v1/prices
+
+The preferred, cacheable form. `tokens` is a comma-separated list of `chainId:address` values, up to 50.
+
+```sh
+curl 'http://localhost:8787/v1/prices?tokens=1:native,8453:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913'
+```
+
+Tokens are sorted and deduplicated before the response is formed, so ordering and casing cannot fragment caches. A request that is not already canonical receives a `308` redirect to the canonical URL, which is itself cacheable.
+
+Responses are sent with `Cache-Control: public, max-age=N`, where `N` is the shortest remaining freshness across the batch: the earlier of the next permitted refresh and the source timestamp plus 300 seconds. It is capped at 300. If the computed lifetime is zero or less the response is sent with `no-store` instead. A `stale` batch is cached only until a refresh becomes possible, because nothing better can be produced before then.
+
 ## POST /v1/prices
 
-Requires `Content-Type: application/json`. Accepts 1–50 tokens across any supported chains, with a maximum body size of 32 KiB.
+Requires `Content-Type: application/json`. Accepts 1–50 tokens across any supported chains, with a maximum body size of 32 KiB. Identical semantics to the GET form, except that the response is always `no-store`, because a request body cannot form a cache key.
 
 ```sh
 curl 'http://localhost:8787/v1/prices' \

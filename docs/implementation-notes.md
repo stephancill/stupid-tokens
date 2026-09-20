@@ -120,3 +120,12 @@
 ## Bulk request cap
 
 - Reduced the bulk price request limit from 100 to 50 tokens, matching the intended usage and keeping a single request well inside Workers subrequest limits. Updated the landing page, API documentation, and the validation test.
+
+## Cacheable bulk prices
+
+- Investigated why `POST /v1/prices` could not be cached: Workers Cache only caches GET/HEAD, the response was explicitly `no-store`, and a request body cannot form a cache key. Confirmed against the Workers Cache documentation that enabling it serves responses without running the Worker, is tiered by default, and collapses concurrent requests for the same key into one invocation.
+- Added `GET /v1/prices?tokens=chainId:address,...` as the preferred form, capped at 50 tokens. Tokens are sorted and deduplicated, and non-canonical requests receive a cacheable `308` to the canonical URL so ordering and address casing cannot fragment the cache.
+- Responses carry `Cache-Control: public, max-age=N` where `N` is the shortest remaining freshness in the batch: the earlier of the next permitted refresh and the source timestamp plus 300 seconds, capped at 300. A lifetime of zero or less returns `no-store`. A stale batch is cached only until a refresh becomes possible. `stale-while-revalidate` is deliberately not used because it would serve data beyond the documented five-minute limit.
+- Refactored price assembly into a shared `loadPrices` used by both forms. The bulk path now uses a single batched D1 read instead of a per-token Cache API fan-out, and only tokens whose cooldown has lapsed reach the coordinator, removing up to 50 subrequests per request.
+- `POST` remains supported with identical semantics but is always `no-store`.
+- Workers Cache itself is not yet enabled; the response headers are already correct so enabling it is a configuration-only change.
