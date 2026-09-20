@@ -24,12 +24,24 @@ export const catalogReportSchema = z.object({
   discoveredChains: z.number().int().nonnegative(),
   chains: z.number().int().nonnegative(),
   tokens: z.number().int().nonnegative(),
+  pendingChains: z.number().int().nonnegative().default(0),
   syncedAt: z.iso.datetime(),
-  imported: z.array(z.object({ chainId: chainIdSchema, tokens: z.number().int().nonnegative() })),
+  imported: z.array(
+    z.object({
+      chainId: chainIdSchema,
+      tokens: z.number().int().nonnegative(),
+      discarded: z.number().int().nonnegative().default(0),
+    }),
+  ),
   skipped: z.array(
     z.object({
       chainId: chainIdSchema,
-      reason: z.enum(["empty_token_list", "token_list_http_404", "token_list_http_410"]),
+      reason: z.enum([
+        "empty_token_list",
+        "token_list_http_404",
+        "token_list_http_410",
+        "unchanged",
+      ]),
     }),
   ),
   // Upstream validation/database error strings can contain provider IDs. Details stay in logs.
@@ -44,20 +56,28 @@ export const catalogReportSchema = z.object({
 });
 
 export const tokenListSchema = z.object({
-  name: z.string(),
-  timestamp: z.iso.datetime({ offset: true }),
-  version: z.object({ major: z.number().int(), minor: z.number().int(), patch: z.number().int() }),
+  name: z.string().optional(),
+  timestamp: z.iso.datetime({ offset: true }).nullish(),
+  version: z
+    .object({
+      major: z.number().nullish(),
+      minor: z.number().nullish(),
+      patch: z.number().nullish(),
+    })
+    .nullish(),
   tokens: z.array(
     z.object({
-      chainId: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-      address: evmAddress,
-      name: z.string().min(1).max(500),
-      symbol: z.string().max(100),
-      decimals: z.number().int().min(0).max(255),
+      chainId: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).nullish(),
+      address: z.string().max(100),
+      name: z.string().max(500).nullish(),
+      symbol: z.string().max(100).nullish(),
+      decimals: z.number().int().min(0).max(255).nullish(),
       logoURI: z.string().url().nullish(),
     }),
   ),
 });
+export type TokenListToken = z.infer<typeof tokenListSchema>["tokens"][number];
+
 export const coinsSchema = z.array(
   z.object({
     id: z.string().min(1).max(250),

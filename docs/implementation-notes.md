@@ -26,13 +26,25 @@
 - Default upstream mode is keyless, with 15 price attempts/minute and 9,000/month. Catalog/seed calls are additional. A CoinGecko key is optional and only raises limits. Metadata import uses the Workers Paid runtime allowances.
 - Deployed as the `stupid-tokens` Worker on the custom domain `tokens.stupidtech.net`, backed by the `stupid-tokens` D1 database. `wrangler.jsonc` contains the real account ID, database ID, and custom-domain route.
 - `workers_dev` is disabled, so the Worker is reachable only via the custom domain.
+- The GitHub repository is `stephancill/stupid-tokens`. Automatic deployment on push to `main` requires the Workers Builds GitHub App connection, which needs the dashboard or a user-scoped API token with the Workers Builds Configuration permission.
 
 ## Keyless upstream default
 
-- Removed the unconditional CoinGecko key requirement. `apiConfig` now accepts an absent or empty `COINGECKO_API_KEY` and omits the key header entirely, matching CoinGecko's documented keyless Public API.
-- Lowered the default `PRICE_REQUESTS_PER_MINUTE` from 80 to 15 for production. Keyless access shares a low, dynamic IP-based pool (roughly 10–30 calls/minute) and CoinGecko warns it is not suitable for production or scheduled polling; Cloudflare egress IPs are also shared with unrelated traffic.
+- Removed the unconditional CoinGecko key requirement. `apiConfig` now accepts an absent or empty `COINGECKO_API_KEY` and omits the key header entirely.
+- **Keyless access from Workers requires a descriptive `User-Agent`.** CoinGecko returns HTTP 403 without one, so all upstream requests now send `stupid-tokens/1.0 (+https://tokens.stupidtech.net)`. Discovered while validating the deployed Worker, where the original implementation failed immediately.
+- Added bounded retries with backoff for transient throttling and server errors: HTTP 403, 429, 5xx, and network failures. Failed price refreshes previously classified only 429 as throttling; 403 is now treated the same way.
+- Lowered the default `PRICE_REQUESTS_PER_MINUTE` from 80 to 15 for production. Keyless access shares a low, dynamic IP-based pool (roughly 10–30 calls/minute), and Cloudflare egress IPs are shared with unrelated traffic.
 - Kept `COINGECKO_PLAN` defaulting to `demo` so a Demo key works by setting only `COINGECKO_API_KEY`, while a Pro key additionally sets `COINGECKO_PLAN=pro`.
-- Updated `.env.local.example`, deployment instructions, and API/architecture docs. Added a runtime test asserting no provider key header is sent by default and that a configured key is passed through.
+- Updated `.env.local.example`, deployment instructions, and API/architecture docs. Added runtime tests for the absent key header, the descriptive User-Agent, and throttling retries.
+
+## Catalog ingestion hardening
+
+- Found by running the sync against real data: the token-list CDN throttles concurrent and rapid requests, and some lists contain null versions, null chain IDs, non-EVM addresses, or entries for other chains.
+- Token lists are now fetched serially with a 250 ms gap instead of at 2–4 way concurrency, and lists that are still throttled after the bulk sweep get one serial retry pass. Throttled chains that fail again are reported and retried by the next sync.
+- Malformed entries are discarded per entry and counted, instead of failing the whole chain. Only a list with no valid entries is reported empty.
+- Added `migrations/0002_chain_content_hash.sql` and a normalized content hash per chain. Unchanged lists are skipped, so repeat and nightly syncs only re-import genuine changes.
+- Catalog responses now include `pendingChains` (chains that produced neither an import, skip, nor failure) and imported entries include `discarded`. A sync that imports nothing because everything is unchanged reports `complete`, while a sync that imports nothing on a never-synchronized catalog reports `failed`.
+- Removed the unused `list` field from chain discovery; token lists are always addressed by CoinGecko platform ID.
 
 ## Automatic chain coverage
 

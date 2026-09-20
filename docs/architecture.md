@@ -21,11 +21,17 @@ Search uses the latest stored market caps, with null values last and chain/addre
 
 Name/symbol queries of at least three characters use indexed substring matching. Two-character queries use indexed prefixes. Exact addresses use an address index. All candidate matches are sorted before applying the limit.
 
-Chain coverage is discovered on every catalog synchronization from CoinGecko's `/asset_platforms`. Platforms with a positive, safe-integer `chain_identifier` (CoinGecko's Chainlist/EIP-155 ID) are candidates; platforms with a null ID are excluded. Platform IDs are preserved and URL-encoded when downloading `https://tokens.coingecko.com/{platformId}/all.json`. Duplicate chain IDs are rejected. Every imported list must contain only EVM addresses on its expected chain.
+Chain coverage is discovered on every catalog synchronization from CoinGecko's `/asset_platforms`. Platforms with a positive, safe-integer `chain_identifier` (CoinGecko's Chainlist/EIP-155 ID) are candidates; platforms with a null ID are excluded. Platform IDs are preserved and URL-encoded when downloading `https://tokens.coingecko.com/{platformId}/all.json`. Duplicate chain IDs are rejected.
+
+Token lists are community maintained, so entries are sanitized instead of trusted: entries without a valid EVM address, with a chain ID that does not match the target chain, or without a name are discarded and counted per chain. A list that yields no valid entries is reported as `empty_token_list`. Discarding is non-fatal so one bad row cannot block a chain.
+
+Each imported list is hashed over its normalized contents. A sync skips a chain whose stored hash is unchanged, so repeat and nightly syncs only re-import chains whose lists actually changed and only re-fetch chains that previously failed.
 
 Native currency names, symbols, and decimals come from the public `https://chainid.network/chains.json` registry, validated with Zod and joined by chain ID. Registry membership does not limit contract-token coverage. When native metadata is missing, contract tokens still import and the report identifies the missing native metadata; decimals are never guessed. If the registry knows the currency but CoinGecko has no native asset mapping, native metadata imports with unavailable pricing.
 
-Four concurrent import loops bound resource use across hundreds of platforms. HTTP 404/410 and valid empty lists are reported as unavailable lists. Other HTTP, validation, and import failures are recorded per chain; successful chains remain usable. A structured `catalog_sync_report` is persisted in D1 and returned to operators. Partial/failed imports return HTTP 503 from the sync endpoint, mark health degraded, and fail scheduled invocations. Existing data is retained for unavailable or failed chains; `syncedAt` remains the last valid import time for each such chain.
+Imports run serially with a short gap and brief retries because the token-list CDN throttles concurrent and rapid requests. Upstream requests send a descriptive `User-Agent`, which CoinGecko requires for keyless access; requests without one receive HTTP 403. Transient throttling (HTTP 403/429) and server errors are retried with exponential backoff, and chains still throttled after the bulk sweep are retried once more. Throttled chains are reported as failures if the retry also fails, and are picked up by the next sync.
+
+Other HTTP, validation, and import failures are recorded per chain; successful chains remain usable. A structured `catalog_sync_report` is persisted in D1 and returned to operators. Partial/failed imports return HTTP 503 from the sync endpoint, mark health degraded, and fail scheduled invocations. Existing data is retained for unavailable or failed chains; `syncedAt` remains the last valid import time for each such chain.
 
 ## Cost controls
 

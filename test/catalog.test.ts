@@ -119,9 +119,9 @@ it("discovers unconfigured EVM chains, encodes platform IDs, and excludes null-I
   expect(report.chains).toBe(3);
   expect(report.tokens).toBe(5);
   expect(report.imported).toEqual([
-    { chainId: 146, tokens: 2 },
-    { chainId: 173, tokens: 2 },
-    { chainId: 9876543, tokens: 1 },
+    { chainId: 146, tokens: 2, discarded: 0 },
+    { chainId: 173, tokens: 2, discarded: 0 },
+    { chainId: 9876543, tokens: 1, discarded: 0 },
   ]);
   expect(report.missingNativeMetadata).toEqual([9876543]);
   expect(report.missingNativeAssetId).toEqual([173]);
@@ -177,7 +177,7 @@ it("reports unavailable and empty token lists explicitly", async () => {
   ]);
 });
 
-it("preserves failed-chain data, serves successful imports, and reports degraded health on partial sync", async () => {
+it("preserves failed-chain data, discards malformed entries, and reports degraded health on partial sync", async () => {
   await importChain({
     db: env.DB,
     chain: { id: 147, name: "Existing", platform: "mismatch" },
@@ -194,6 +194,7 @@ it("preserves failed-chain data, serves successful imports, and reports degraded
       },
     ],
   });
+  const malformed = list({ chainId: 149 });
   upstream({
     platforms: [
       platform({ id: "healthy", chainId: 146 }),
@@ -204,10 +205,15 @@ it("preserves failed-chain data, serves successful imports, and reports degraded
     responses: {
       mismatch: () => Response.json(list({ chainId: 999 })),
       unavailable: () => new Response(null, { status: 500 }),
+      // A wrong-chain entry and a non-EVM address are dropped, not fatal.
       invalid: () =>
         Response.json({
-          ...list({ chainId: 149 }),
-          tokens: [{ ...list({ chainId: 149 }).tokens[0], address: "not-an-evm-address" }],
+          ...malformed,
+          tokens: [
+            malformed.tokens[0],
+            { ...malformed.tokens[0], address: "not-an-evm-address" },
+            { ...malformed.tokens[0], chainId: 1, address: address({ n: 9 }) },
+          ],
         }),
     },
   });
@@ -217,16 +223,18 @@ it("preserves failed-chain data, serves successful imports, and reports degraded
   const report = await response.json<{
     status: string;
     chains: number;
+    imported: { chainId: number; discarded: number }[];
     failures: { chainId: number; message: string }[];
   }>();
   expect(report.status).toBe("partial");
-  expect(report.chains).toBe(1);
-  expect(report.failures.map((failure) => failure.chainId)).toEqual([147, 148, 149]);
+  expect(report.chains).toBe(2);
+  expect(report.failures.map((failure) => failure.chainId)).toEqual([148]);
+  expect(report.imported.find((chain) => chain.chainId === 149)?.discarded).toBe(2);
   for (const failure of report.failures)
     expect(failure.message).toBe(
       `Token import failed for chain ${failure.chainId}; see Worker logs`,
     );
-  expect(log).toHaveBeenCalledTimes(3);
+  expect(log).toHaveBeenCalledTimes(1);
   expect(
     (await getTokens({ db: env.DB, tokens: [{ chainId: 147, address: tokenAddress }] }))[0]?.name,
   ).toBe("Existing Token");
@@ -276,6 +284,28 @@ it("sends the provider key header only when a key is configured", async () => {
   expect(calls.length).toBeGreaterThan(0);
   for (const [, init] of calls)
     expect(init?.headers).toMatchObject({ "x-cg-demo-api-key": "configured-key" });
+});
+
+it("skips unchanged lists on repeat sync and reports pending chains", async () => {
+  upstream({
+    platforms: [
+      platform({ id: "stable", chainId: 146 }),
+      platform({ id: "missing", chainId: 147 }),
+    ],
+    responses: { missing: () => new Response(null, { status: 404 }) },
+  });
+  const first = await syncCatalog({ env });
+  expect(first.status).toBe("complete");
+  expect(first.chains).toBe(1);
+  expect(first.pendingChains).toBe(0);
+  const second = await syncCatalog({ env });
+  expect(second.chains).toBe(0);
+  expect(second.tokens).toBe(0);
+  expect(second.skipped).toEqual([
+    { chainId: 146, reason: "unchanged" },
+    { chainId: 147, reason: "token_list_http_404" },
+  ]);
+  expect(second.status).toBe("complete");
 });
 
 it("fails explicitly when no lists are available and rejects ambiguous chain IDs", async () => {

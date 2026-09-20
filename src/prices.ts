@@ -226,7 +226,9 @@ export class PriceCoordinator extends DurableObject<Env> {
         message: error instanceof Error ? error.message : "Unknown upstream failure",
       });
       const throttled =
-        error instanceof Error && "upstreamStatus" in error && error.upstreamStatus === 429;
+        error instanceof Error &&
+        "upstreamStatus" in error &&
+        (error.upstreamStatus === 429 || error.upstreamStatus === 403);
       if (throttled) {
         const retryAt =
           "retryAt" in error && typeof error.retryAt === "number" ? error.retryAt : now + 60_000;

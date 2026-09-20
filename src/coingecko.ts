@@ -15,20 +15,35 @@ export function apiConfig({ env }: { env: Env }) {
   };
 }
 
+// CoinGecko's keyless API rejects requests without a descriptive User-Agent (HTTP 403).
+export const USER_AGENT = "stupid-tokens/1.0 (+https://tokens.stupidtech.net)";
+
 export async function fetchJson({
   url,
   headers = {},
   timeoutMs = 15_000,
+  attempts = 3,
 }: {
   url: string;
   headers?: Record<string, string>;
   timeoutMs?: number;
+  attempts?: number;
 }): Promise<unknown> {
-  const response = await fetch(url, {
-    headers: { accept: "application/json", ...headers },
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  if (!response.ok) {
+  for (let attempt = 1; ; attempt++) {
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        headers: { accept: "application/json", "user-agent": USER_AGENT, ...headers },
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch (error) {
+      if (attempt < attempts) {
+        await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** (attempt - 1)));
+        continue;
+      }
+      throw error;
+    }
+    if (response.ok) return response.json();
     const retry = response.headers.get("retry-after");
     const retryAt = retry
       ? /^\d+$/.test(retry)
@@ -36,12 +51,17 @@ export async function fetchJson({
         : Date.parse(retry)
       : NaN;
     await response.body?.cancel();
+    // Keyless access is commonly throttled with 429 or 403, so retry those and 5xx briefly.
+    const retryable = response.status === 429 || response.status === 403 || response.status >= 500;
+    if (retryable && attempt < attempts) {
+      await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** (attempt - 1)));
+      continue;
+    }
     throw Object.assign(new Error(`${new URL(url).hostname} returned HTTP ${response.status}`), {
       upstreamStatus: response.status,
       retryAt: Number.isFinite(retryAt) ? retryAt : Date.now() + 60_000,
     });
   }
-  return response.json();
 }
 
 export async function apiJson({

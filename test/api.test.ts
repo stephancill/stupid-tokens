@@ -222,8 +222,10 @@ describe("bulk prices and global refresh coordination", () => {
       "concurrent-large",
       "concurrent-small",
     ]);
-    // Keyless by default: no provider key header is sent.
-    expect(upstream.mock.calls[0]![1]?.headers).not.toHaveProperty("x-cg-demo-api-key");
+    // Keyless by default: no provider key header is sent, but a descriptive User-Agent is.
+    const headers = upstream.mock.calls[0]![1]?.headers as Record<string, string>;
+    expect(headers).not.toHaveProperty("x-cg-demo-api-key");
+    expect(headers["user-agent"]).toContain("stupid-tokens");
     const cached = await prices({ tokens });
     expect(cached.status).toBe(200);
     expect(upstream).toHaveBeenCalledTimes(1);
@@ -269,10 +271,12 @@ describe("bulk prices and global refresh coordination", () => {
     const [first] = await stub.getPrices({ ids: ["failure-small"] });
     expect(first?.price_status).toBe("upstream_error");
     expect(first!.refresh_after - first!.last_attempt_at!).toBe(REFRESH_MS);
+    // Transient upstream errors are retried briefly before the cooldown is finalized.
+    expect(upstream).toHaveBeenCalledTimes(3);
     await abortAllDurableObjects();
     stub = env.PRICES.getByName("coingecko");
     await stub.getPrices({ ids: ["failure-small"] });
-    expect(upstream).toHaveBeenCalledTimes(1);
+    expect(upstream).toHaveBeenCalledTimes(3);
   });
 
   it("enforces provider-wide monthly budgets without another upstream call", async () => {
@@ -292,17 +296,26 @@ describe("bulk prices and global refresh coordination", () => {
     expect(upstream).not.toHaveBeenCalled();
   });
 
-  it("honors upstream 429 backoff across different assets", async () => {
+  it("retries throttled upstreams, then backs off across different assets", async () => {
     await seed({ prefix: "backoff" });
-    const upstream = mockPrices({ status: 429 });
+    let calls = 0;
+    const upstream = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      calls++;
+      throw Object.assign(new Error("CoinGecko returned HTTP 429"), {
+        upstreamStatus: 429,
+        retryAt: Date.now() + 120_000,
+      });
+    });
     const stub = env.PRICES.getByName("coingecko");
     expect((await stub.getPrices({ ids: ["backoff-small"] }))[0]?.price_status).toBe(
       "rate_limited",
     );
+    // One logical attempt, retried twice for transient throttling.
+    expect(upstream).toHaveBeenCalledTimes(3);
     expect((await stub.getPrices({ ids: ["backoff-large"] }))[0]?.price_status).toBe(
       "rate_limited",
     );
-    expect(upstream).toHaveBeenCalledTimes(1);
+    expect(calls).toBe(3);
   });
 
   it("distinguishes stale source timestamps and unknown tokens without making unknown-token calls", async () => {

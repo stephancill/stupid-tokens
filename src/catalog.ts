@@ -9,6 +9,7 @@ import {
   marketsSchema,
   platformsSchema,
   tokenListSchema,
+  type TokenListToken,
 } from "./validation";
 
 export type CatalogToken = {
@@ -21,15 +22,63 @@ export type CatalogToken = {
   imageUrl: string | null;
 };
 
+export function contentHash({ tokens }: { tokens: CatalogToken[] }) {
+  const canonical = tokens
+    .map((token) =>
+      [
+        token.chainId,
+        token.address,
+        token.assetId ?? "",
+        token.name,
+        token.symbol,
+        token.decimals,
+        token.imageUrl ?? "",
+      ].join("\u0000"),
+    )
+    .join("\u0001");
+  const bytes = new TextEncoder().encode(canonical);
+  return crypto.subtle
+    .digest("SHA-256", bytes)
+    .then((digest) =>
+      Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join(""),
+    );
+}
+
+const EVM_ADDRESS = /^0x[0-9a-f]{40}$/;
+
+// Token lists are community maintained and contain invalid or misplaced entries.
+function parseTokens({ chainId, list }: { chainId: number; list: TokenListToken[] }) {
+  const tokens: CatalogToken[] = [];
+  let discarded = 0;
+  for (const token of list) {
+    if (!EVM_ADDRESS.test(token.address) || token.chainId !== chainId || !token.name) {
+      discarded++;
+      continue;
+    }
+    tokens.push({
+      chainId,
+      address: token.address,
+      assetId: null,
+      name: token.name,
+      symbol: token.symbol ?? "",
+      decimals: token.decimals ?? 18,
+      imageUrl: token.logoURI ?? null,
+    });
+  }
+  return { tokens, discarded };
+}
+
 export async function importChain({
   db,
   chain,
   tokens,
+  hash,
   now,
 }: {
   db: D1Database;
   chain: { id: number; name: string; platform: string };
   tokens: CatalogToken[];
+  hash?: string;
   now: number;
 }) {
   if (tokens.length === 0 || tokens.some((token) => token.chainId !== chain.id))
@@ -68,7 +117,9 @@ export async function importChain({
         "DELETE FROM tokens WHERE chain_id = ? AND address NOT IN (SELECT value FROM json_each(?))",
       )
       .bind(chain.id, JSON.stringify(tokens.map((token) => token.address))),
-    db.prepare("UPDATE chains SET synced_at = ? WHERE id = ?").bind(now, chain.id),
+    db
+      .prepare("UPDATE chains SET synced_at = ?, content_hash = ? WHERE id = ?")
+      .bind(now, hash ?? null, chain.id),
   ]);
 }
 
@@ -124,74 +175,135 @@ export async function syncCatalog({ env }: { env: Env }) {
             mapping.set(key, coin.id);
           }
         }
-        const imported: { chainId: number; tokens: number }[] = [];
+        const imported: { chainId: number; tokens: number; discarded: number }[] = [];
         const skipped: { chainId: number; reason: string }[] = [];
         const failures: { chainId: number; message: string }[] = [];
         const missingNativeMetadata: number[] = [];
         const missingNativeAssetId: number[] = [];
+        const retryable: typeof chains = [];
+        const existingHashes = new Map(
+          (
+            await env.DB.prepare(
+              "SELECT id, content_hash FROM chains WHERE content_hash IS NOT NULL",
+            ).all<{
+              id: number;
+              content_hash: string;
+            }>()
+          ).results.map((row) => [row.id, row.content_hash]),
+        );
+        const alreadySynced =
+          (
+            await env.DB.prepare(
+              "SELECT COUNT(*) AS count FROM chains WHERE synced_at IS NOT NULL",
+            ).first<{ count: number }>()
+          )?.count ?? 0;
+
+        async function importOneChain({
+          chain,
+          retry = false,
+        }: {
+          chain: (typeof chains)[number];
+          retry?: boolean;
+        }) {
+          const identity = { chainId: chain.id };
+          try {
+            const list = tokenListSchema.parse(
+              await fetchJson({
+                url: `https://tokens.coingecko.com/${encodeURIComponent(chain.platform)}/all.json`,
+                timeoutMs: 10_000,
+                attempts: 5,
+              }),
+            );
+            if (!list.tokens.length) {
+              skipped.push({ ...identity, reason: "empty_token_list" });
+              return;
+            }
+            const { tokens, discarded } = parseTokens({ chainId: chain.id, list: list.tokens });
+            for (const token of tokens)
+              token.assetId = mapping.get(`${chain.platform}:${token.address}`) ?? null;
+            if (chain.native) {
+              tokens.push({
+                chainId: chain.id,
+                address: "native",
+                assetId: chain.nativeAssetId,
+                ...chain.native,
+                imageUrl: null,
+              });
+            }
+            if (!tokens.length) {
+              skipped.push({ ...identity, reason: "empty_token_list" });
+              return;
+            }
+            const hash = await contentHash({ tokens });
+            if (existingHashes.get(chain.id) === hash) {
+              skipped.push({ ...identity, reason: "unchanged" });
+              return;
+            }
+            await importChain({ db: env.DB, chain, tokens, hash, now: Date.now() });
+            imported.push({ ...identity, tokens: tokens.length, discarded });
+            if (!chain.native) missingNativeMetadata.push(chain.id);
+            if (!chain.nativeAssetId) missingNativeAssetId.push(chain.id);
+          } catch (error) {
+            const status =
+              error instanceof Error && "upstreamStatus" in error ? error.upstreamStatus : null;
+            if (status === 404 || status === 410) {
+              skipped.push({ ...identity, reason: `token_list_http_${status}` });
+            } else if (status === 429 || status === 403) {
+              if (retry) {
+                const message = "Throttled by the token-list CDN on retry";
+                failures.push({ ...identity, message });
+                console.error("chain_import_throttled", { ...identity, message });
+              } else {
+                retryable.push(chain);
+              }
+            } else {
+              const message =
+                error instanceof Error ? error.message.slice(0, 2000) : "Unknown import error";
+              failures.push({ ...identity, message });
+              console.error("chain_import_failed", { ...identity, message });
+            }
+          }
+        }
+
         let cursor = 0;
+        // The token-list CDN throttles concurrent requests, so fetch serially with a small gap.
         async function importNextChains() {
           for (;;) {
             const chain = chains[cursor++];
             if (!chain) return;
-            const identity = { chainId: chain.id };
-            try {
-              const list = tokenListSchema.parse(
-                await fetchJson({
-                  url: `https://tokens.coingecko.com/${encodeURIComponent(chain.platform)}/all.json`,
-                  timeoutMs: 10_000,
-                }),
-              );
-              if (!list.tokens.length) {
-                skipped.push({ ...identity, reason: "empty_token_list" });
-                continue;
-              }
-              const tokens: CatalogToken[] = list.tokens.map((token) => ({
-                chainId: token.chainId,
-                address: token.address,
-                assetId: mapping.get(`${chain.platform}:${token.address}`) ?? null,
-                name: token.name,
-                symbol: token.symbol,
-                decimals: token.decimals,
-                imageUrl: token.logoURI ?? null,
-              }));
-              if (chain.native) {
-                tokens.push({
-                  chainId: chain.id,
-                  address: "native",
-                  assetId: chain.nativeAssetId,
-                  ...chain.native,
-                  imageUrl: null,
-                });
-              }
-              await importChain({ db: env.DB, chain, tokens, now: Date.now() });
-              imported.push({ ...identity, tokens: tokens.length });
-              if (!chain.native) missingNativeMetadata.push(chain.id);
-              if (!chain.nativeAssetId) missingNativeAssetId.push(chain.id);
-            } catch (error) {
-              if (
-                error instanceof Error &&
-                "upstreamStatus" in error &&
-                (error.upstreamStatus === 404 || error.upstreamStatus === 410)
-              ) {
-                skipped.push({ ...identity, reason: `token_list_http_${error.upstreamStatus}` });
-              } else {
-                const message =
-                  error instanceof Error ? error.message.slice(0, 2000) : "Unknown import error";
-                failures.push({ ...identity, message });
-                console.error("chain_import_failed", { ...identity, message });
-              }
-            }
+            await importOneChain({ chain });
+            await new Promise((resolve) => setTimeout(resolve, 250));
           }
         }
-        // Bound concurrent list parsing, network connections, and D1 writes across hundreds of chains.
-        await Promise.all(Array.from({ length: 4 }, () => importNextChains()));
+        await importNextChains();
+        if (retryable.length) {
+          console.log("catalog_retrying_throttled_chains", { chains: retryable.length });
+          for (const chain of retryable.sort((a, b) => a.id - b.id)) {
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+            await importOneChain({ chain, retry: true });
+          }
+        }
         const finishedAt = new Date().toISOString();
         const report = catalogReportSchema.parse({
-          status: !imported.length ? "failed" : failures.length ? "partial" : "complete",
+          // "Nothing imported" is only a failure when no chain has ever synchronized.
+          status: imported.length
+            ? failures.length
+              ? "partial"
+              : "complete"
+            : alreadySynced > 0 && !failures.length
+              ? "complete"
+              : failures.length
+                ? "partial"
+                : "failed",
           discoveredChains: chains.length,
           chains: imported.length,
           tokens: imported.reduce((sum, chain) => sum + chain.tokens, 0),
+          pendingChains: chains.filter(
+            (chain) =>
+              !imported.some((item) => item.chainId === chain.id) &&
+              !skipped.some((item) => item.chainId === chain.id) &&
+              !failures.some((item) => item.chainId === chain.id),
+          ).length,
           syncedAt: finishedAt,
           imported: imported.sort((a, b) => a.chainId - b.chainId),
           skipped: skipped.sort((a, b) => a.chainId - b.chainId),

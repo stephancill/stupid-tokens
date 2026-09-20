@@ -114,10 +114,10 @@ Error responses have `{ "error": { "code": "...", "message": "..." } }`.
 
 All require `Authorization: Bearer <ADMIN_TOKEN>`:
 
-- `POST /admin/sync`: discover EVM platforms and import their available token lists. Returns a report with `status` (`complete`, `partial`, or `failed`), `discoveredChains`, `chains`, `tokens`, `syncedAt`, and arrays of `imported`, `skipped`, `failures`, `missingNativeMetadata`, and `missingNativeAssetId`. Returns HTTP 503 for partial or failed synchronization.
+- `POST /admin/sync`: discover EVM platforms and import their available token lists. Returns a report with `status` (`complete`, `partial`, or `failed`), `discoveredChains`, `chains`, `tokens`, `pendingChains`, `syncedAt`, and arrays of `imported`, `skipped`, `failures`, `missingNativeMetadata`, and `missingNativeAssetId`. Returns HTTP 503 for partial or failed synchronization.
 - `POST /admin/seed-market-caps`: one-time full-catalog market-cap/image seed. It does not populate or refresh prices. Completed seeding cannot be repeated through the endpoint.
 - `GET /admin/status`: catalog state and token/asset counts.
 
-Every `imported`, `skipped`, or `failures` entry identifies its chain with `chainId`. Both missing-native arrays contain numeric chain IDs, not provider asset IDs. For example, an imported entry is `{ "chainId": 146, "tokens": 100 }`.
+Every `imported`, `skipped`, or `failures` entry identifies its chain with `chainId`. Both missing-native arrays contain numeric chain IDs, not provider asset IDs. For example, an imported entry is `{ "chainId": 146, "tokens": 100 }`. `imported` entries also include `discarded`, the number of malformed or wrong-chain list entries skipped for that chain. `skipped` reasons are `unchanged`, `empty_token_list`, `token_list_http_404`, and `token_list_http_410`. `pendingChains` counts chains that produced neither an import, a skip, nor a failure.
 
 The daily cron refreshes metadata only. Keep the HTTP connection open while a manual import/seed runs; these can take minutes for a full catalog. A failed import retains existing data, and a failed seed can be retried. Per-chain pruning happens only after that chain's validated import completes. Missing lists (HTTP 404/410) and valid empty lists are explicitly reported as skipped. Other errors fail that chain's import, appear in `failures`, and make the overall run partial/failed. The most recent completed report is also stored as `catalog_sync_report` in `/admin/status`.
