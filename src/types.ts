@@ -3,6 +3,7 @@ import type { PriceCoordinator } from "./prices";
 export interface Env {
   DB: D1Database;
   PRICES: DurableObjectNamespace<PriceCoordinator>;
+  ASSETS: Fetcher;
   // Omit for CoinGecko's keyless public API, or set COINGECKO_PLAN=pro with a Pro key.
   COINGECKO_API_KEY?: string;
   COINGECKO_PLAN?: string;

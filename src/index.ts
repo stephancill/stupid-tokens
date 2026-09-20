@@ -60,11 +60,17 @@ app.onError((error, c) => {
 });
 app.notFound((c) => c.json({ error: { code: "not_found", message: "Endpoint not found" } }, 404));
 
-app.get("/", (c) =>
+// The static site lives in ./public and is served through the assets binding. API routes keep
+// precedence because they are registered below; "/" serves the landing page.
+app.get("/", (c) => c.env.ASSETS.fetch(new Request(new URL("/index.html", c.req.url))));
+
+// Machine-readable index for API clients.
+app.get("/v1", (c) =>
   c.json({
-    name: "Stupid Tokens",
+    name: "stupid tokens",
     version: "1",
     currency: "usd",
+    docs: "https://tokens.stupidtech.net",
     endpoints: [
       "GET /v1/chains",
       "GET /v1/search?q=usdc",

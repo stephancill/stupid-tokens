@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>stupid tokens</title>
+    <meta
+      name="description"
+      content="A free, keyless API for EVM token prices, metadata, and search. Bulk USD prices, name/symbol/address search ordered by market cap."
+    />
+    <meta property="og:title" content="stupid tokens" />
+    <meta
+      property="og:description"
+      content="A free, keyless API for EVM token prices, metadata, and search."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://tokens.stupidtech.net" />
+    <meta property="og:image" content="https://tokens.stupidtech.net/og.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 46rem;
+        margin: 2rem auto;
+        padding: 0 1rem;
+        line-height: 1.6;
+      }
+      code,
+      pre {
+        background: #f4f4f4;
+        padding: 0.15rem 0.35rem;
+        border-radius: 4px;
+      }
+      pre {
+        padding: 1rem;
+        overflow: auto;
+      }
+      form {
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      input,
+      button {
+        font: inherit;
+      }
+      button {
+        padding: 0.25rem 0.75rem;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 0.35rem 0.75rem 0.35rem 0;
+        vertical-align: top;
+        border-bottom: 1px solid #eee;
+      }
+      th {
+        font-weight: 600;
+      }
+      td code {
+        white-space: nowrap;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>stupid tokens</h1>
+    <p>
+      A free, keyless API for EVM token prices, metadata, and search. No signup, no API key, CORS
+      enabled. Prices are USD.
+    </p>
+    <p>
+      Token identity is <code>{ chainId, address }</code>. Addresses are case-insensitive. Native
+      currencies use the literal address <code>native</code>. Responses identify chains by numeric
+      <code>chainId</code> only.
+    </p>
+
+    <h2>Endpoints</h2>
+    <table>
+      <tr>
+        <th>Endpoint</th>
+        <th>Description</th>
+      </tr>
+      <tr>
+        <td><code>GET /v1/chains</code></td>
+        <td>Supported chains with token counts.</td>
+      </tr>
+      <tr>
+        <td><code>GET /v1/search</code></td>
+        <td>Search by name, symbol, or exact address, ordered by market cap.</td>
+      </tr>
+      <tr>
+        <td><code>GET /v1/tokens/{chainId}/{address}</code></td>
+        <td>Metadata for one token.</td>
+      </tr>
+      <tr>
+        <td><code>POST /v1/prices</code></td>
+        <td>Bulk USD prices for up to 100 tokens across chains.</td>
+      </tr>
+      <tr>
+        <td><code>GET /health</code></td>
+        <td>Readiness and catalog status.</td>
+      </tr>
+    </table>
+
+    <h2>Search</h2>
+    <pre><code>curl 'https://tokens.stupidtech.net/v1/search?q=usdc&amp;chainId=8453&amp;limit=5'</code></pre>
+    <p>
+      Matches a case-insensitive name or symbol substring, or an exact contract address.
+      <code>chainId</code> and <code>limit</code> are optional. Results are ordered by stored market
+      cap descending, with unknown caps last.
+    </p>
+    <pre><code>{
+  "tokens": [
+    {
+      "chainId": 8453,
+      "address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "name": "USDC",
+      "symbol": "USDC",
+      "decimals": 6,
+      "imageUrl": "https://assets.coingecko.com/coins/images/6319/thumb/USDC.png",
+      "marketCapUsd": "74000000000",
+      "marketCapUpdatedAt": "2026-09-20T18:48:50.540Z",
+      "metadataUpdatedAt": "2026-09-20T18:48:50.540Z"
+    }
+  ]
+}</code></pre>
+
+    <h2>Token Metadata</h2>
+    <pre><code>curl 'https://tokens.stupidtech.net/v1/tokens/1/0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'</code></pre>
+    <p>
+      Returns the metadata object shown above, or HTTP 404 when the token is not in the catalog.
+    </p>
+
+    <h2>Bulk Prices</h2>
+    <pre><code>curl 'https://tokens.stupidtech.net/v1/prices' \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "tokens": [
+      { "chainId": 1, "address": "native" },
+      { "chainId": 8453, "address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" }
+    ]
+  }'</code></pre>
+    <p>
+      One result per input, in input order, including duplicates. A valid batch returns HTTP 200
+      even when individual tokens are unavailable.
+    </p>
+    <pre><code>{
+  "currency": "usd",
+  "prices": [
+    {
+      "chainId": 1,
+      "address": "native",
+      "status": "ok",
+      "priceUsd": "2629.256297515841",
+      "priceUpdatedAt": "2026-09-20T18:53:00.000Z",
+      "marketCapUsd": null,
+      "marketCapUpdatedAt": null,
+      "fetchedAt": "2026-09-20T18:53:02.000Z",
+      "nextRefreshAt": "2026-09-20T18:58:00.000Z"
+    }
+  ]
+}</code></pre>
+    <table>
+      <tr>
+        <th>Status</th>
+        <th>Meaning</th>
+      </tr>
+      <tr>
+        <td><code>ok</code></td>
+        <td>Price available, source timestamp within 5 minutes.</td>
+      </tr>
+      <tr>
+        <td><code>stale</code></td>
+        <td>Source timestamp older than 5 minutes; <code>priceUsd</code> is null.</td>
+      </tr>
+      <tr>
+        <td><code>not_found</code></td>
+        <td>Chain and address are absent from the catalog.</td>
+      </tr>
+      <tr>
+        <td><code>price_unavailable</code></td>
+        <td>No usable price from any source.</td>
+      </tr>
+      <tr>
+        <td><code>upstream_error</code></td>
+        <td>A source request failed.</td>
+      </tr>
+      <tr>
+        <td><code>rate_limited</code></td>
+        <td>A source throttled the refresh; retry after <code>nextRefreshAt</code>.</td>
+      </tr>
+    </table>
+
+    <h2>Notes</h2>
+    <p>
+      Prices refresh on demand, at most once per token per 5 minutes, shared across callers. Only
+      <code>ok</code> carries a non-null price. Metadata and market caps are stored locally and
+      search never contacts an upstream provider. Coverage is the CoinGecko-listed EVM catalog, so
+      unlisted tokens return <code>not_found</code>.
+    </p>
+    <p>
+      Prices and market caps come from DefiLlama, GeckoTerminal, and DexScreener, merged with
+      preference for the freshest usable source. DEX-derived prices require a minimum pool
+      liquidity. Token metadata is sourced from CoinGecko.
+    </p>
+
+    <h2>Limits</h2>
+    <p>
+      Up to 100 tokens per price request, 100 search results per request, and a 32 KiB request body.
+      The service is free and unauthenticated, so please cache responses and avoid tight polling.
+    </p>
+
+    <p>
+      <a href="https://github.com/stephancill/stupid-tokens">github</a>
+      -
+      <a href="https://x.com/stephancill">twitter</a>
+      -
+      <a href="https://stupidtech.net">stupidtech.net</a>
+    </p>
+  </body>
+</html>

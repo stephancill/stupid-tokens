@@ -5,6 +5,7 @@
   "account_id": "2e6717908caccc8ef5eebae01beea4aa",
   "workers_dev": false,
   "routes": [{ "pattern": "tokens.stupidtech.net", "custom_domain": true }],
+  "assets": { "directory": "./public", "binding": "ASSETS" },
   "compatibility_date": "2026-09-20",
   "compatibility_flags": ["nodejs_compat"],
   "d1_databases": [

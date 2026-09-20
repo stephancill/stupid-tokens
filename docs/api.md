@@ -1,5 +1,7 @@
 # API
 
+The landing page at `https://tokens.stupidtech.net` documents this API. `GET /v1` returns a machine-readable index. The site is served from `public/` through the Worker's assets binding; API routes take precedence over static files.
+
 The public API requires no key and supports CORS. Prices and market caps are USD. Monetary values are decimal strings or `null`. Times are ISO 8601 UTC strings.
 
 Token identity is `{ chainId, address }`. EVM addresses are case-insensitive and normalized to lowercase. Native currencies use the literal address `native`. A source asset can have several chain deployments; its price and global market cap are shared.

@@ -99,3 +99,10 @@
 - That run exposed a merge defect: YFI is liquid (Alchemy 2197) but returned `stale`, because the merge took the first source with any price and DefiLlama's timestamp had lagged past the freshness limit, shadowing fresher DEX prices.
 - `mergeQuotes` now prefers the highest-priority source whose price is still within the freshness window, falling back to any available price (which the response then reports as `stale`). A missing timestamp is treated as fresh because freshness is then unknown. Market cap and image still prefer the first source that provides them.
 - Added a runtime test proving a fresh lower-priority DEX price supersedes a stale primary price, and kept a test that withholds a price when every source is stale.
+
+## Landing site
+
+- Added a static landing page with a brief API reference at `public/index.html`, served through the Worker's `ASSETS` binding on the custom domain. `GET /v1` now returns the machine-readable endpoint index that previously lived at `/`.
+- Styling follows the shared Stupid minimal aesthetic: system-ui type, a 46rem column, light-gray code blocks, no framework or build step. The page carries a full set of Open Graph tags and a lowercased `stupid tokens` title.
+- Generated `favicon.png` (32px), `apple-touch-icon.png` (180px), and `og.png` (1200x630) from the supplied mark with ImageMagick, so the tab icon and link preview match.
+- Documented endpoint behaviour on the page: identity as `chainId` plus `address`, `native` for native currencies, market-cap-ordered search, the per-item price statuses, the five-minute refresh cooldown, request limits, and the upstream sources.
