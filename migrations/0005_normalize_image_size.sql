@@ -2,12 +2,20 @@
 -- UI use. The identical asset is served at `/large/` (250x250) from the same URL with a
 -- different size segment, so upgrade CoinGecko image URLs in place. Only CoinGecko image
 -- hosts are rewritten; unrelated hosts are left untouched.
+-- `instr` is used instead of `LIKE` because D1 rejects the multi-wildcard pattern as too
+-- complex.
 UPDATE tokens
 SET image_url = replace(image_url, '/thumb/', '/large/')
-WHERE image_url LIKE 'https://assets.coingecko.com/coins/images/%/thumb/%'
-   OR image_url LIKE 'https://coin-images.coingecko.com/coins/images/%/thumb/%';
+WHERE instr(image_url, '/thumb/') > 0
+  AND (
+    instr(image_url, 'https://assets.coingecko.com/coins/images/') = 1
+    OR instr(image_url, 'https://coin-images.coingecko.com/coins/images/') = 1
+  );
 
 UPDATE assets
 SET image_url = replace(image_url, '/thumb/', '/large/')
-WHERE image_url LIKE 'https://assets.coingecko.com/coins/images/%/thumb/%'
-   OR image_url LIKE 'https://coin-images.coingecko.com/coins/images/%/thumb/%';
+WHERE instr(image_url, '/thumb/') > 0
+  AND (
+    instr(image_url, 'https://assets.coingecko.com/coins/images/') = 1
+    OR instr(image_url, 'https://coin-images.coingecko.com/coins/images/') = 1
+  );
