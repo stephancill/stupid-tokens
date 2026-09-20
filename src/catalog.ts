@@ -135,10 +135,11 @@ async function withImportLock<T>({
 }) {
   const now = Date.now();
   const owner = `${now}:${crypto.randomUUID()}`;
+  // A killed invocation never releases its lock, so expire stale locks quickly.
   const result = await env.DB.prepare(`INSERT INTO app_state(key, value) VALUES (?, ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value
     WHERE CAST(app_state.value AS INTEGER) < ? RETURNING value`)
-    .bind(key, owner, now - 3_600_000)
+    .bind(key, owner, now - 10 * 60_000)
     .first<{ value: string }>();
   if (result?.value !== owner)
     throw new HTTPException(409, { message: "An import is already running" });
@@ -151,11 +152,14 @@ async function withImportLock<T>({
   }
 }
 
-export async function syncCatalog({ env }: { env: Env }) {
+export async function syncCatalog({ env, budgetMs = 8 * 60_000 }: { env: Env; budgetMs?: number }) {
   return withImportLock({
     env,
     key: "catalog_lock",
     run: async () => {
+      // Bound each invocation so a run always finishes and records its report. Remaining
+      // chains are reported and picked up by the next run.
+      const deadline = Date.now() + budgetMs;
       try {
         const [coins, platforms, registry] = await Promise.all([
           apiJson({ env, path: "/coins/list", query: { include_platform: "true" } }).then((data) =>
@@ -268,44 +272,57 @@ export async function syncCatalog({ env }: { env: Env }) {
         }
 
         let cursor = 0;
+        let budgetExhausted = false;
         // The token-list CDN throttles concurrent requests, so fetch serially with a small gap.
         async function importNextChains() {
           for (;;) {
             const chain = chains[cursor++];
             if (!chain) return;
+            if (Date.now() > deadline) {
+              budgetExhausted = true;
+              cursor--;
+              return;
+            }
             await importOneChain({ chain });
             await new Promise((resolve) => setTimeout(resolve, 250));
           }
         }
         await importNextChains();
-        if (retryable.length) {
+        if (retryable.length && !budgetExhausted) {
           console.log("catalog_retrying_throttled_chains", { chains: retryable.length });
           for (const chain of retryable.sort((a, b) => a.id - b.id)) {
+            if (Date.now() > deadline) {
+              budgetExhausted = true;
+              break;
+            }
             await new Promise((resolve) => setTimeout(resolve, 1000));
             await importOneChain({ chain, retry: true });
           }
         }
         const finishedAt = new Date().toISOString();
-        const report = catalogReportSchema.parse({
-          // "Nothing imported" is only a failure when no chain has ever synchronized.
-          status: imported.length
-            ? failures.length
-              ? "partial"
-              : "complete"
-            : alreadySynced > 0 && !failures.length
-              ? "complete"
-              : failures.length
-                ? "partial"
-                : "failed",
-          discoveredChains: chains.length,
-          chains: imported.length,
-          tokens: imported.reduce((sum, chain) => sum + chain.tokens, 0),
-          pendingChains: chains.filter(
+        const pending = chains
+          .filter(
             (chain) =>
               !imported.some((item) => item.chainId === chain.id) &&
               !skipped.some((item) => item.chainId === chain.id) &&
               !failures.some((item) => item.chainId === chain.id),
-          ).length,
+          )
+          .map((chain) => chain.id);
+        const report = catalogReportSchema.parse({
+          // Unavailable lists are a permanent, non-degrading skip. Only failures or deferred
+          // chains make a usable catalog partial.
+          status:
+            imported.length || alreadySynced > 0
+              ? failures.length || pending.length
+                ? "partial"
+                : "complete"
+              : "failed",
+          budgetExhausted,
+          discoveredChains: chains.length,
+          chains: imported.length,
+          tokens: imported.reduce((sum, chain) => sum + chain.tokens, 0),
+          pendingChains: pending.length,
+          pending: pending.sort((a, b) => a - b),
           syncedAt: finishedAt,
           imported: imported.sort((a, b) => a.chainId - b.chainId),
           skipped: skipped.sort((a, b) => a.chainId - b.chainId),
@@ -313,14 +330,15 @@ export async function syncCatalog({ env }: { env: Env }) {
           missingNativeMetadata: missingNativeMetadata.sort((a, b) => a - b),
           missingNativeAssetId: missingNativeAssetId.sort((a, b) => a - b),
         });
+        // A usable catalog stays usable; partial coverage is a warning, not an outage.
+        const usable = imported.length > 0 || alreadySynced > 0;
         const error =
           report.status === "complete"
             ? ""
-            : `${report.status}: imported ${imported.length}/${chains.length} chains; ${failures.length} failed`;
+            : `${report.status}: imported ${imported.length}/${chains.length} chains; ${failures.length} failed; ${pending.length} pending`;
         await setState({ db: env.DB, key: "catalog_sync_report", value: JSON.stringify(report) });
-        await setState({ db: env.DB, key: "catalog_error", value: error });
-        if (imported.length)
-          await setState({ db: env.DB, key: "catalog_synced_at", value: finishedAt });
+        await setState({ db: env.DB, key: "catalog_error", value: usable ? "" : error });
+        if (usable) await setState({ db: env.DB, key: "catalog_synced_at", value: finishedAt });
         return report;
       } catch (error) {
         await setState({

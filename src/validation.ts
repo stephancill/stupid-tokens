@@ -25,6 +25,8 @@ export const catalogReportSchema = z.object({
   chains: z.number().int().nonnegative(),
   tokens: z.number().int().nonnegative(),
   pendingChains: z.number().int().nonnegative().default(0),
+  pending: z.array(chainIdSchema).default([]),
+  budgetExhausted: z.boolean().default(false),
   syncedAt: z.iso.datetime(),
   imported: z.array(
     z.object({

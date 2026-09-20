@@ -74,18 +74,22 @@ app.get("/", (c) =>
 );
 
 app.get("/health", async (c) => {
-  const [syncedAt, error] = await Promise.all([
+  const [syncedAt, error, report] = await Promise.all([
     stateValue({ db: c.env.DB, key: "catalog_synced_at" }),
     stateValue({ db: c.env.DB, key: "catalog_error" }),
+    stateValue({ db: c.env.DB, key: "catalog_sync_report" }),
   ]);
+  const summary = report ? catalogReportSchema.parse(JSON.parse(report)) : null;
   c.header("Cache-Control", "no-store");
   return c.json(
     {
       ready: syncedAt !== null,
       catalogSyncedAt: syncedAt,
+      catalogStatus: summary?.status ?? null,
+      catalogPendingChains: summary?.pendingChains ?? null,
       catalogError: error ? "Catalog synchronization failed; see Worker logs" : null,
     },
-    syncedAt && !error ? 200 : 503,
+    syncedAt ? 200 : 503,
   );
 });
 
@@ -264,7 +268,7 @@ app.use("/admin/*", async (c, next) => {
 });
 app.post("/admin/sync", async (c) => {
   const report = await syncCatalog({ env: c.env });
-  return c.json(report, report.status === "complete" ? 200 : 503);
+  return c.json(report, report.status === "failed" ? 503 : 200);
 });
 app.post("/admin/seed-market-caps", async (c) => c.json(await seedMarketCaps({ env: c.env })));
 app.get("/admin/status", async (c) => {

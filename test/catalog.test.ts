@@ -219,7 +219,8 @@ it("preserves failed-chain data, discards malformed entries, and reports degrade
   });
   const log = vi.spyOn(console, "error").mockImplementation(() => {});
   const response = await request({ path: "/admin/sync", method: "POST" });
-  expect(response.status).toBe(503);
+  // A usable catalog is not an outage just because some chains are unavailable.
+  expect(response.status).toBe(200);
   const report = await response.json<{
     status: string;
     chains: number;
@@ -239,8 +240,8 @@ it("preserves failed-chain data, discards malformed entries, and reports degrade
     (await getTokens({ db: env.DB, tokens: [{ chainId: 147, address: tokenAddress }] }))[0]?.name,
   ).toBe("Existing Token");
   const health = await request({ path: "/health" });
-  expect(health.status).toBe(503);
-  expect(await health.json()).toMatchObject({ ready: true });
+  expect(health.status).toBe(200);
+  expect(await health.json()).toMatchObject({ ready: true, catalogStatus: "partial" });
   expect((await request({ path: "/v1/search?q=found" })).status).toBe(200);
   expect(JSON.parse((await stateValue({ db: env.DB, key: "catalog_sync_report" }))!).status).toBe(
     "partial",

@@ -48,6 +48,15 @@
 - Removed the unused `list` field from chain discovery; token lists are always addressed by CoinGecko platform ID.
 - Reworked market-cap seeding into a resumable backfill shared with the nightly job. A backfill that exhausts its time budget reports `complete: false` with `remaining` and is not recorded as complete, so it can be re-run; previously an incomplete seed was permanently marked done. The nightly job now also refreshes caps that are missing or older than seven days, so newly added tokens get caps without operator action.
 
+## Catalog convergence and readiness
+
+- Found in production that no sync run had ever completed: a 275-chain sweep exceeds the invocation budget, so `catalog_synced_at` was never written and the API reported itself unready while holding 26k tokens. The import lock also persisted for an hour after a killed run, blocking retries.
+- Sync invocations are now bounded to a configurable budget (default eight minutes) and always write a report. Remaining chains are reported in `pending` with a `budgetExhausted` flag, so repeated calls converge.
+- The import lock now expires after ten minutes instead of one hour, and a concurrent call returns HTTP 409 rather than a generic failure.
+- Readiness now tracks a usable catalog: any run that leaves at least one chain imported marks the catalog usable. Partial coverage is a warning surfaced through `catalogStatus` and `catalogPendingChains` rather than an outage. Previously any failure left health and all `/v1` routes returning 503.
+- Unavailable lists (HTTP 404/410) and valid empty lists are non-degrading skips, since many listed platforms publish no token list. Only failures or deferred chains make a usable catalog `partial`.
+- Sync reports now include `pendingChains`, `pending`, and `budgetExhausted`, and `admin/status` and `health` expose the summarised status.
+
 ## Automatic chain coverage
 
 - Replaced the initial eight-chain allowlist with automatic discovery from CoinGecko's numeric Chainlist/EIP-155 platform IDs. Platform IDs are URL-encoded without changing their case; the live source includes uppercase, underscore, and space-containing IDs, plus a non-EVM empty-ID placeholder.

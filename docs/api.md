@@ -108,14 +108,20 @@ Responses use `Cache-Control: no-store`; the Worker internally caches raw per-as
 
 Error responses have `{ "error": { "code": "...", "message": "..." } }`.
 
-`GET /health` returns `ready`, `catalogSyncedAt`, and `catalogError`. Readiness means at least one chain has been successfully imported during a completed synchronization. HTTP 503 indicates an uninitialized catalog or a degraded synchronization; successfully imported and previously stored data remain available through the public API during partial failures. `catalogSyncedAt` is the last completed run that imported at least one chain.
+`GET /health` returns `ready`, `catalogSyncedAt`, `catalogStatus`, `catalogPendingChains`, and `catalogError`. Readiness means a usable catalog exists, which is true once any run has imported at least one chain. HTTP 503 indicates an uninitialized catalog or a run that could import nothing. Partial coverage is reported through `catalogStatus` and `catalogPendingChains` while the API remains ready, and successfully imported and previously stored data stay available. `catalogSyncedAt` is the last completed run that left the catalog usable.
 
 ## Operator endpoints
 
 All require `Authorization: Bearer <ADMIN_TOKEN>`:
 
-- `POST /admin/sync`: discover EVM platforms and import their available token lists. Returns a report with `status` (`complete`, `partial`, or `failed`), `discoveredChains`, `chains`, `tokens`, `pendingChains`, `syncedAt`, and arrays of `imported`, `skipped`, `failures`, `missingNativeMetadata`, and `missingNativeAssetId`. Returns HTTP 503 for partial or failed synchronization.
+- `POST /admin/sync`: discover EVM platforms and import their available token lists. Returns a report with `status` (`complete`, `partial`, or `failed`), `discoveredChains`, `chains`, `tokens`, `pendingChains`, `pending`, `budgetExhausted`, `syncedAt`, and arrays of `imported`, `skipped`, `failures`, `missingNativeMetadata`, and `missingNativeAssetId`. Returns HTTP 503 only when the run could import nothing and no catalog exists yet; a partial run returns HTTP 200.
+
+  Each invocation is bounded to roughly eight minutes and always records a report, so a large catalog converges over successive calls. Deferred chains appear in `pending`, and `budgetExhausted` is true when the time budget was reached. Call it again to continue.
+
 - `POST /admin/seed-market-caps`: backfill market caps and images across the catalog, initially and after new chains are added. It does not populate or refresh prices. Returns `assets`, `complete`, `remaining`, and `seededAt`. Runs are resumable: a run that exhausts its time budget reports `complete: false` with the remaining count, and a later run continues where it left off. It is not a one-shot endpoint and may be called repeatedly. The nightly job also refreshes caps for assets whose caps are missing or older than seven days.
+
+Both operator endpoints hold a short-lived import lock so two runs cannot overlap. A concurrent call returns HTTP 409. The lock expires after ten minutes, so an interrupted run does not block future runs for long.
+
 - `GET /admin/status`: catalog state and token/asset counts.
 
 Every `imported`, `skipped`, or `failures` entry identifies its chain with `chainId`. Both missing-native arrays contain numeric chain IDs, not provider asset IDs. For example, an imported entry is `{ "chainId": 146, "tokens": 100 }`. `imported` entries also include `discarded`, the number of malformed or wrong-chain list entries skipped for that chain. `skipped` reasons are `unchanged`, `empty_token_list`, `token_list_http_404`, and `token_list_http_410`. `pendingChains` counts chains that produced neither an import, a skip, nor a failure.
