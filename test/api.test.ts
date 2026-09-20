@@ -639,4 +639,133 @@ describe("upstream ingestion", () => {
     ).toEqual({ updated: 0, remaining: 0 });
     expect(upstream.mock.calls.length).toBe(calls);
   });
+
+  it("does not let an unresolvable market cap block the rest of the backfill", async () => {
+    // Two assets: one whose cap no source can resolve, and one that can be capped.
+    const unresolved = `1:${address({ n: 41 })}`;
+    const resolvable = `1:${address({ n: 42 })}`;
+    await importChain({
+      db: env.DB,
+      chain: { id: 1, name: "Ethereum", platform: "ethereum" },
+      now: Date.now(),
+      tokens: [
+        {
+          chainId: 1,
+          address: address({ n: 41 }),
+          assetId: unresolved,
+          name: "No Cap",
+          symbol: "NC",
+          decimals: 18,
+          imageUrl: null,
+        },
+        {
+          chainId: 1,
+          address: address({ n: 42 }),
+          assetId: resolvable,
+          name: "Has Cap",
+          symbol: "HC",
+          decimals: 18,
+          imageUrl: null,
+        },
+      ],
+    });
+    await setState({ db: env.DB, key: "catalog_synced_at", value: new Date().toISOString() });
+    // Only the second asset resolves; the first is omitted from every source response.
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = new URL(String(input));
+      if (url.hostname === "api.geckoterminal.com")
+        return Response.json({
+          data: [
+            {
+              attributes: {
+                address: address({ n: 42 }),
+                price_usd: "1",
+                market_cap_usd: "500",
+                image_url: null,
+                total_reserve_in_usd: "1000000",
+              },
+            },
+          ],
+        });
+      if (url.hostname === "api.dexscreener.com") return Response.json([]);
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    const first = await refreshMarketCaps({ env, maxAgeMs: 60_000, deadline: Date.now() + 5_000 });
+    expect(first.updated).toBe(1);
+    const capped = async (id: string) =>
+      await env.DB.prepare("SELECT market_cap_usd, market_cap_checked_at FROM assets WHERE id = ?")
+        .bind(id)
+        .first<{ market_cap_usd: number | null; market_cap_checked_at: number | null }>();
+    expect((await capped(resolvable))?.market_cap_usd).toBe(500);
+    // The unresolved asset records the attempt, so it is not re-selected immediately.
+    expect((await capped(unresolved))?.market_cap_checked_at).not.toBeNull();
+
+    const second = await refreshMarketCaps({ env, maxAgeMs: 60_000, deadline: Date.now() + 5_000 });
+    expect(second.updated).toBe(0);
+    // Once the checked gate lapses it becomes due again.
+    const third = await refreshMarketCaps({
+      env,
+      maxAgeMs: 60_000,
+      checkedMs: 0,
+      deadline: Date.now() + 5_000,
+    });
+    expect(third.updated).toBe(1);
+  });
+
+  it("gates a throttled GeckoTerminal off for the rest of a backfill run and keeps fallback caps", async () => {
+    // 61 assets span two 60-asset refresh batches, so a second batch exists to be skipped.
+    const tokens = Array.from({ length: 61 }, (_, index) => ({
+      chainId: 1,
+      address: address({ n: index + 100 }),
+      assetId: `1:${address({ n: index + 100 })}`,
+      name: `Token ${index}`,
+      symbol: `TKN${index}`,
+      decimals: 18,
+      imageUrl: null,
+    }));
+    await importChain({
+      db: env.DB,
+      chain: { id: 1, name: "Ethereum", platform: "ethereum" },
+      gtNetwork: "eth",
+      tokens,
+      now: Date.now(),
+    });
+    await setState({ db: env.DB, key: "catalog_synced_at", value: new Date().toISOString() });
+    const upstream = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = new URL(String(input));
+      if (url.hostname === "api.geckoterminal.com")
+        return new Response("rate limited", { status: 429 });
+      if (url.hostname === "api.dexscreener.com") {
+        const addresses = decodeURIComponent(url.pathname.split("/tokens/v1/ethereum/")[1] ?? "")
+          .split(",")
+          .filter(Boolean);
+        return Response.json(
+          addresses.map((address) => ({
+            chainId: "ethereum",
+            priceUsd: "1",
+            marketCap: 500,
+            fdv: null,
+            baseToken: { address },
+            liquidity: { usd: 1_000_000 },
+          })),
+        );
+      }
+      throw new Error(`Unexpected upstream request: ${url}`);
+    });
+    expect(await seedMarketCaps({ env })).toMatchObject({ complete: true, remaining: 0 });
+    // GeckoTerminal is attempted only once, in the first batch: the first 30-address chunk is
+    // retried once by fetchJson (two requests) before the loader aborts and the source is gated
+    // off. The second batch skips it entirely.
+    const geckoCalls = upstream.mock.calls.filter(
+      ([input]) => new URL(String(input)).hostname === "api.geckoterminal.com",
+    ).length;
+    expect(geckoCalls).toBe(2);
+    // DexScreener still supplies the cap that GeckoTerminal could not.
+    const [token] = await getTokens({
+      db: env.DB,
+      tokens: [{ chainId: 1, address: address({ n: 100 }) }],
+    });
+    expect(token?.market_cap_usd).toBe(500);
+  });
 });

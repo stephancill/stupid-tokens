@@ -23,6 +23,46 @@ export type ChainSource = {
   geckoTerminalNetwork: string | null;
 };
 
+// `fetchJson` attaches the upstream status to the error it throws, so callers can tell a
+// throttled provider (stop asking) apart from a transient one.
+export function upstreamStatus({ error }: { error: unknown }): number | null {
+  if (!(error instanceof Error) || !("upstreamStatus" in error)) return null;
+  const status = (error as Error & { upstreamStatus?: unknown }).upstreamStatus;
+  return typeof status === "number" ? status : null;
+}
+
+export function isThrottleError({ error }: { error: unknown }): boolean {
+  const status = upstreamStatus({ error });
+  return status === 429 || status === 403;
+}
+
+// A throttling response may carry `Retry-After`, which `fetchJson` surfaces as `retryAt`.
+export function upstreamRetryAt({ error }: { error: unknown }): number | null {
+  if (!(error instanceof Error) || !("retryAt" in error)) return null;
+  const retryAt = (error as Error & { retryAt?: unknown }).retryAt;
+  return typeof retryAt === "number" ? retryAt : null;
+}
+
+// A provider that reports throttling is skipped for the rest of the run instead of paying a
+// failing request on every batch. Only the sources named in `gated` can be closed, so a
+// provider that has to surface total failure to its caller (the primary price source, or the
+// last remaining fallback) is never silenced by a sibling's error.
+export type SourceGate = {
+  allows: (name: ProviderName) => boolean;
+  close: (name: ProviderName, error: unknown) => void;
+};
+
+export function createSourceGate({ gated }: { gated: ProviderName[] }): SourceGate {
+  const closed = new Set<ProviderName>();
+  const gateable = new Set(gated);
+  return {
+    allows: (name) => !closed.has(name),
+    close: (name, error) => {
+      if (gateable.has(name) && isThrottleError({ error })) closed.add(name);
+    },
+  };
+}
+
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 const NATIVE = "native";
 // A DEX price from a thin pool is trivially manipulated, so require real liquidity.
@@ -309,21 +349,28 @@ export async function geckoTerminalNetworks() {
 }
 
 // A source that is throttled or broken must not discard results from the others, so each
-// is isolated. Only if every source fails does the refresh count as an upstream failure.
+// is isolated. Only if every attempted source fails does the refresh count as an upstream
+// failure. A `gate` can drop a known-throttled source before it is attempted.
 export async function trySources({
   loaders,
+  gate,
 }: {
   loaders: { name: ProviderName; load: () => Promise<Map<string, ProviderQuote>> }[];
+  gate?: SourceGate;
 }) {
   const sources: Map<string, ProviderQuote>[] = [];
   let lastError: unknown = null;
+  let attempted = 0;
   let failures = 0;
   for (const loader of loaders) {
+    if (gate && !gate.allows(loader.name)) continue;
+    attempted++;
     try {
       sources.push(await loader.load());
     } catch (error) {
       failures++;
       lastError = error;
+      gate?.close(loader.name, error);
       console.error("price_source_failed", {
         source: loader.name,
         message: error instanceof Error ? error.message : "Unknown upstream failure",
@@ -331,7 +378,7 @@ export async function trySources({
       sources.push(new Map());
     }
   }
-  if (failures === loaders.length && lastError) throw lastError;
+  if (attempted > 0 && failures === attempted && lastError) throw lastError;
   return mergeQuotes({ sources, now: Date.now() });
 }
 

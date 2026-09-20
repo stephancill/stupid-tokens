@@ -14,7 +14,7 @@
 ## Verification
 
 - Type checking, linting, formatting, Workers-runtime integration tests, and a Wrangler deployment dry run pass.
-- Twenty-four Workers-runtime integration tests cover market-cap ordering, substring/address queries, import updates and pruning, imports spanning multiple chunks, a maximum-size bulk price request, concurrent deduplication, persistence across forced object restarts, failed-refresh cooldowns, budgets and backoff, stale prices, validation, native-token ingestion, automatic chain discovery, unavailable and empty lists, partial synchronization failures, canonical GET caching and redirects, freshness-bounded `max-age`, and source isolation and merge behaviour.
+- Twenty-six Workers-runtime integration tests cover market-cap ordering, substring/address queries, import updates and pruning, imports spanning multiple chunks, a maximum-size bulk price request, concurrent deduplication, persistence across forced object restarts, failed-refresh cooldowns, budgets and backoff, stale prices, validation, native-token ingestion, automatic chain discovery, unavailable and empty lists, partial synchronization failures, canonical GET caching and redirects, freshness-bounded `max-age`, and source isolation, source gating, and merge behaviour.
 - Validated live CoinGecko platform/coin-ID responses and seven full token lists containing 18,328 entries. Live data exposed an empty symbol, so the schema preserves source-provided empty symbols; missing images remain nullable. The Gnosis token list was also retrieved and inspected.
 - Local D1 migrations apply successfully. Local HTTP checks confirm CORS preflight and explicit not-ready responses before catalog initialization. The root path now serves the landing page.
 - Bundled Worker is approximately 895 KiB uncompressed / 150 KiB gzip.
@@ -92,6 +92,8 @@
 - Found by probing from Cloudflare's network that GeckoTerminal returns HTTP 429 to Workers while DefiLlama and DexScreener return 200. Because the three sources were awaited in a single array literal, a GeckoTerminal 429 aborted the whole refresh and discarded the successful DefiLlama price, so no price was ever served.
 - Added `trySources`, which isolates each provider: a throttled or broken source contributes nothing and is logged, while the remaining sources still produce a result. A refresh is only treated as an upstream failure when every source fails, which preserves the existing backoff behaviour.
 - Applied the same isolation to the market-cap path, so caps can still come from DexScreener when GeckoTerminal is throttled.
+- Added a per-run source gate (`createSourceGate`). Isolation alone still paid a failing request on every market-cap batch, so a 12-minute backfill spent most of its budget on GeckoTerminal requests that could not succeed. The gate closes a throttled source for the remainder of the run: `refreshMarketCaps` gates GeckoTerminal, and the price coordinator closes it for the lifetime of its Durable Object instance. Only sources explicitly listed as gateable can be closed, so the primary price source and the last remaining fallback still surface total failure to the caller. A later run starts with a clean gate, so a recovered source is used again.
+- Added a Workers-runtime test that a throttled GeckoTerminal is attempted only once per backfill run and that DexScreener still supplies the cap.
 
 ## Freshness-aware source merge
 
@@ -143,6 +145,7 @@
 - Final chain accounting across 275 discovered platforms: 187 synchronized, 68 unavailable (re-checked after 7 days), 20 failed (retried after 6 hours), and **0 never seen**. Nothing is permanently due, which was the original defect.
 - Catalog holds 26,485 tokens across 187 chains.
 - Market-cap coverage is being filled by the resumable backfill, which is run repeatedly until it reports `complete: true`. GeckoTerminal throttles Cloudflare egress addresses, so caps largely come from DexScreener in production; running the backfill from a non-Cloudflare address lets GeckoTerminal contribute caps and images.
+- Market-cap coverage was far from converged: 24,146 of 26,485 assets had never had a cap fetched, so ranked search only showed the seeded minority and Base USDC was absent from `q=usdc`. A demand price request (`POST /v1/prices`) fills the cap immediately, and the resumable backfill now converges faster because a throttled GeckoTerminal is dropped after its first failed batch instead of being retried on every batch.
 - Price serving verified end to end against live sources: DefiLlama supplied prices, DexScreener supplied market caps, and native currencies priced correctly on five chains.
 
 ## Logo resolution
@@ -153,3 +156,11 @@
 - Added migration `0005_normalize_image_size.sql`, which rewrites already-stored `/thumb/` URLs in `tokens.image_url` and `assets.image_url` so existing rows are fixed without waiting for a full re-sync. The normalized import also changes the per-chain content hash, so the next sync re-imports lists and reconciles any rows the migration missed.
 - Verified the three size variants live for USDC: `/thumb/` is 25x25 (983 B), `/small/` is 50x50 (2.3 KB), and `/large/` is 250x250 (19 KB); a random sample of twelve `/large/` rewrites all returned HTTP 200.
 - Added a Workers-runtime test asserting that a CoinGecko `/thumb/` logo is stored as `/large/` and that a non-CoinGecko host containing `/thumb/` is left unchanged.
+
+## Backfill progress and source gating
+
+- Found in production that the market-cap backfill stalled: coverage sat at 4,406 of 26,485 assets across successive runs. Two distinct causes, both variations of the "permanently due" defect fixed earlier for chains.
+- **Unresolvable caps blocked progress.** Assets whose cap no source can provide stayed NULL, and the selection query ordered NULLs first, so every run re-attempted the same uncappable assets and never reached the rest. Verified with a live counter-example: a Base token with a 4.45M market cap on DexScreener remained NULL because the run never got to it. Added `migrations/0005_asset_market_cap_checked_at.sql`; every attempted asset records `market_cap_checked_at` whether or not a cap was resolved, and selection now requires both a stale cap and a lapsed check window (7 days).
+- **A throttled source was re-probed on every batch.** GeckoTerminal returns 429 to Cloudflare egress, so each 60-asset batch paid a failing request (with retries and backoff) before falling back to DexScreener. Added a per-run `SourceGate` circuit breaker: once a gated source reports throttling it is skipped for the remainder of that invocation, while ungated sources keep serving. Only GeckoTerminal is gated, so the primary price source and the last remaining fallback can never be silenced by a sibling's error.
+- `trySources` now counts _attempted_ sources rather than all loaders when deciding whether every source failed, so skipping a gated source cannot be mistaken for total upstream failure.
+- Added tests covering the gate (a throttled GeckoTerminal is dropped for the rest of a run while fallback caps still land) and progress (an unresolvable cap records its attempt, is not re-selected immediately, and becomes due again once the check window lapses).

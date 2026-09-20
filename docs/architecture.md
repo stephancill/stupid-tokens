@@ -44,7 +44,7 @@ Other HTTP, validation, and import failures are recorded per chain; successful c
 
 ## Cost controls
 
-Bulk limits, shared 300-second reservations, provider-level request budgets, short-lived shared edge caches, and change-only catalog upserts bound work. Public requests cannot start metadata imports or market-cap seeding. Unknown tokens never trigger upstream lookups.
+Bulk limits, shared 300-second reservations, provider-level request budgets, short-lived shared edge caches, and change-only catalog upserts bound work. Public requests cannot start metadata imports or market-cap seeding. Unknown tokens never trigger upstream lookups. A provider that reports throttling is dropped for the remainder of the run instead of being re-probed on every batch, so a single throttled source cannot consume the run's budget; the next run retries it.
 
 None of the price sources require an API key. DefiLlama accepts large batches; GeckoTerminal and DexScreener accept 30 addresses per request, so one 100-token bulk request costs a small, fixed number of upstream calls per refresh. Keyless sources share low, contended rate pools, so the default request budget is deliberately conservative and the nightly job refreshes only metadata that is due rather than polling continuously.
 

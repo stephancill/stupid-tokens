@@ -2,11 +2,13 @@ import { CHAIN_REGISTRY_URL, discoverChains } from "./chains";
 import { apiJson, fetchJson } from "./coingecko";
 import { setState, stateValue, getChainSources } from "./database";
 import {
+  createSourceGate,
   dexscreenerQuotes,
   geckoTerminalNetworks,
   geckoTerminalQuotes,
   normalizeImageUrl,
   trySources,
+  type SourceGate,
 } from "./providers";
 import { HTTPException } from "hono/http-exception";
 import type { Env } from "./types";
@@ -434,7 +436,17 @@ export async function syncCatalog({
   });
 }
 
-async function marketCapBatch({ env, ids, now }: { env: Env; ids: string[]; now: number }) {
+async function marketCapBatch({
+  env,
+  ids,
+  now,
+  gate,
+}: {
+  env: Env;
+  ids: string[];
+  now: number;
+  gate: SourceGate;
+}) {
   const tokens = ids.map((id) => {
     const [chainId, ...rest] = id.split(":");
     return { chainId: Number(chainId), address: rest.join(":") };
@@ -444,6 +456,7 @@ async function marketCapBatch({ env, ids, now }: { env: Env; ids: string[]; now:
     chainIds: [...new Set(tokens.map((token) => token.chainId))],
   });
   const merged = await trySources({
+    gate,
     loaders: [
       { name: "geckoterminal", load: () => geckoTerminalQuotes({ tokens, chains: chainSources }) },
       { name: "dexscreener", load: () => dexscreenerQuotes({ tokens, chains: chainSources }) },
@@ -461,16 +474,21 @@ async function marketCapBatch({ env, ids, now }: { env: Env; ids: string[]; now:
           },
         ],
   );
-  if (payload.length) {
-    await env.DB.prepare(`UPDATE assets SET
+  await env.DB.batch([
+    // Record the attempt for every asset, including those with no resolvable cap. Otherwise
+    // they stay NULL and are re-selected first on every run, starving the rest of the catalog.
+    env.DB.prepare(
+      `UPDATE assets SET market_cap_checked_at = ? WHERE id IN (SELECT value FROM json_each(?))`,
+    ).bind(now, JSON.stringify(ids)),
+    env.DB.prepare(`UPDATE assets SET
       image_url = COALESCE(json_extract(m.value, '$.image'), assets.image_url),
       market_cap_usd = CASE WHEN COALESCE(assets.market_cap_updated_at, 0) <= json_extract(m.value, '$.updatedAt')
         THEN json_extract(m.value, '$.cap') ELSE assets.market_cap_usd END,
       market_cap_updated_at = MAX(COALESCE(assets.market_cap_updated_at, 0), json_extract(m.value, '$.updatedAt'))
-      FROM json_each(?) m WHERE assets.id = json_extract(m.value, '$.id')`)
-      .bind(JSON.stringify(payload))
-      .run();
-  }
+      FROM json_each(?) m WHERE assets.id = json_extract(m.value, '$.id')`).bind(
+      JSON.stringify(payload),
+    ),
+  ]);
   return payload.length;
 }
 
@@ -479,26 +497,36 @@ async function marketCapBatch({ env, ids, now }: { env: Env; ids: string[]; now:
 export async function refreshMarketCaps({
   env,
   maxAgeMs,
+  checkedMs = 7 * 24 * 60 * 60 * 1000,
   deadline,
 }: {
   env: Env;
   maxAgeMs: number;
+  checkedMs?: number;
   deadline: number;
 }) {
   // A non-finite max age means "refresh everything"; Date.now() - Infinity would overflow.
   const staleBefore = Number.isFinite(maxAgeMs) ? Date.now() - maxAgeMs : Date.now() + 1;
+  const checkedBefore = Date.now() - checkedMs;
+  // An asset is only due when its cap is stale *and* it has not been attempted recently, so a
+  // cap that cannot be resolved does not block progress for the rest of the catalog.
   const ids = (
     await env.DB.prepare(`SELECT DISTINCT t.asset_id AS id FROM tokens t
       JOIN assets a ON a.id = t.asset_id
       WHERE t.asset_id IS NOT NULL
         AND (a.market_cap_updated_at IS NULL OR a.market_cap_updated_at < ?)
+        AND (a.market_cap_checked_at IS NULL OR a.market_cap_checked_at < ?)
       ORDER BY a.market_cap_usd IS NULL DESC, a.market_cap_usd DESC`)
-      .bind(staleBefore)
+      .bind(staleBefore, checkedBefore)
       .all<{ id: string }>()
   ).results.map((row) => row.id);
   let updated = 0;
   let cursor = 0;
   let throttled = false;
+  // GeckoTerminal throttles Cloudflare egress, so a backfill that re-probes it on every batch
+  // spends its budget on failing requests. Gate it off for the rest of the run once it reports
+  // throttling; the next run retries from a clean slate.
+  const gate = createSourceGate({ gated: ["geckoterminal"] });
   // Keyless upstreams throttle above a few requests per minute, so stay serial and gentle.
   while (cursor < ids.length) {
     if (Date.now() > deadline) {
@@ -511,6 +539,7 @@ export async function refreshMarketCaps({
         env,
         ids: ids.slice(cursor, cursor + 60),
         now: Date.now(),
+        gate,
       });
     } catch (error) {
       throttled = true;

@@ -1,7 +1,15 @@
 import { DurableObject } from "cloudflare:workers";
 import { z } from "zod";
 import { getChainSources, getQuotes, writeQuotes } from "./database";
-import { defillamaQuotes, dexscreenerQuotes, geckoTerminalQuotes, trySources } from "./providers";
+import {
+  createSourceGate,
+  defillamaQuotes,
+  dexscreenerQuotes,
+  geckoTerminalQuotes,
+  isThrottleError,
+  trySources,
+  upstreamRetryAt,
+} from "./providers";
 import { refreshIdsSchema } from "./validation";
 import { REFRESH_MS, type Env, type QuoteRow } from "./types";
 
@@ -15,6 +23,9 @@ export class PriceCoordinator extends DurableObject<Env> {
   private pending = new Map<string, Pending>();
   private queue = new Set<string>();
   private flushing = false;
+  // GeckoTerminal throttles Cloudflare egress; once it reports throttling this instance stops
+  // asking until it is evicted, while DefiLlama and DexScreener keep serving.
+  private gate = createSourceGate({ gated: ["geckoterminal"] });
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -194,6 +205,7 @@ export class PriceCoordinator extends DurableObject<Env> {
       });
       const fetchedAt = Date.now();
       const merged = await trySources({
+        gate: this.gate,
         loaders: [
           { name: "defillama", load: () => defillamaQuotes({ tokens, chains: chainSources }) },
           {
@@ -230,13 +242,9 @@ export class PriceCoordinator extends DurableObject<Env> {
         assets: reserved.length,
         message: error instanceof Error ? error.message : "Unknown upstream failure",
       });
-      const throttled =
-        error instanceof Error &&
-        "upstreamStatus" in error &&
-        (error.upstreamStatus === 429 || error.upstreamStatus === 403);
+      const throttled = isThrottleError({ error });
       if (throttled) {
-        const retryAt =
-          "retryAt" in error && typeof error.retryAt === "number" ? error.retryAt : now + 60_000;
+        const retryAt = upstreamRetryAt({ error }) ?? now + 60_000;
         this.ctx.storage.sql.exec(
           `INSERT INTO backoff(id, until_ms) VALUES (1, ?)
           ON CONFLICT(id) DO UPDATE SET until_ms = excluded.until_ms`,
