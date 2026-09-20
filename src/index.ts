@@ -73,8 +73,10 @@ app.notFound((c) => c.json({ error: { code: "not_found", message: "Endpoint not 
 app.get("/", (c) => c.env.ASSETS.fetch(new Request(new URL("/index.html", c.req.url))));
 
 // Machine-readable index for API clients.
-app.get("/v1", (c) =>
-  c.json({
+app.get("/v1", (c) => {
+  // Static index; state freshness explicitly instead of relying on heuristic caching.
+  c.header("Cache-Control", "public, max-age=3600");
+  return c.json({
     name: "stupid tokens",
     version: "1",
     currency: "usd",
@@ -86,8 +88,8 @@ app.get("/v1", (c) =>
       "POST /v1/prices",
     ],
     attribution: { name: "Data provided by CoinGecko", url: "https://www.coingecko.com/en/api" },
-  }),
-);
+  });
+});
 
 app.get("/health", async (c) => {
   const [syncedAt, error, report] = await Promise.all([
@@ -171,8 +173,9 @@ app.get("/v1/search", async (c) => {
       return rows.map((row) => tokenResponse({ row }));
     },
   });
-  // Revalidation prevents downstream caches from restarting the edge's TTL.
-  c.header("Cache-Control", "no-cache");
+  // Cacheable, bounded to the same window as the internal edge cache. `no-cache` would force an
+  // inline revalidation on every request, so the Worker would run even on a cache hit.
+  c.header("Cache-Control", "public, max-age=60");
   return c.json({ tokens: data });
 });
 
@@ -191,7 +194,9 @@ app.get("/v1/tokens/:chainId/:address", async (c) => {
       return row ? tokenResponse({ row }) : null;
     },
   });
-  c.header("Cache-Control", "no-cache");
+  // Metadata changes only on catalog sync, so a longer stale window is safe and keeps the Worker
+  // out of the request path. A not-found answer is equally stable.
+  c.header("Cache-Control", "public, max-age=60, stale-while-revalidate=3600");
   if (!data)
     return c.json({ error: { code: "not_found", message: "Token is not in the catalog" } }, 404);
   return c.json(data);

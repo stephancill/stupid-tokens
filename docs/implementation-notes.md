@@ -129,3 +129,10 @@
 - Refactored price assembly into a shared `loadPrices` used by both forms. The bulk path now uses a single batched D1 read instead of a per-token Cache API fan-out, and only tokens whose cooldown has lapsed reach the coordinator, removing up to 50 subrequests per request.
 - `POST` remains supported with identical semantics but is always `no-store`.
 - Workers Cache itself is not yet enabled; the response headers are already correct so enabling it is a configuration-only change.
+
+## Cache-Control for Workers Cache readiness
+
+- Audited every endpoint before enabling Workers Cache and found that `no-cache` on search and token metadata would defeat caching entirely: per the Workers Cache documentation, `no-cache` stores the response but revalidates inline with the Worker on every request, so the Worker runs and CPU is billed on every hit.
+- Search is now `public, max-age=60`, matching its internal edge-cache window. Token metadata is `public, max-age=60, stale-while-revalidate=3600`, which is safe because metadata only changes on catalog sync. A not-found token answer is equally stable and carries the same header.
+- `GET /v1` now states `public, max-age=3600` explicitly. It previously had no `Cache-Control` at all, which under Workers Cache would have been cached for two hours by RFC 9111 heuristic freshness rather than by intent.
+- Documented that migrations are not run by the Workers Builds deploy, so schema changes must be applied with `wrangler d1 migrations apply --remote` after deploying. Migration 0004 was found unapplied in production, which would have broken the next scheduled sync.
