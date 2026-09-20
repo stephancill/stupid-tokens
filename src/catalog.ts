@@ -1,6 +1,7 @@
 import { CHAIN_REGISTRY_URL, discoverChains } from "./chains";
 import { apiJson, fetchJson, priceBatch } from "./coingecko";
 import { setState, stateValue } from "./database";
+import { HTTPException } from "hono/http-exception";
 import type { Env } from "./types";
 import {
   catalogReportSchema,
@@ -139,7 +140,8 @@ async function withImportLock<T>({
     WHERE CAST(app_state.value AS INTEGER) < ? RETURNING value`)
     .bind(key, owner, now - 3_600_000)
     .first<{ value: string }>();
-  if (result?.value !== owner) throw new Error("An import is already running");
+  if (result?.value !== owner)
+    throw new HTTPException(409, { message: "An import is already running" });
   try {
     return await run();
   } finally {
