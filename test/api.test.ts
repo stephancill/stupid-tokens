@@ -111,8 +111,12 @@ async function pricesGet({ tokens }: { tokens: string }) {
   return request({ path: `/v1/prices?tokens=${tokens}` });
 }
 
-// Prices now come from address-keyed providers. DefiLlama supplies the price; GeckoTerminal
-// supplies market caps; DexScreener is the fallback.
+// Percent changes returned by the DefiLlama percentage endpoint, keyed by window. The source
+// already reports percentages.
+type MockChange = { h1: number | null; h24: number | null; d7: number | null };
+
+// Prices now come from address-keyed providers. DefiLlama supplies the price and percent price
+// changes; GeckoTerminal supplies market caps; DexScreener is the fallback.
 function mockPrices({
   delay = 0,
   status = 200,
@@ -120,6 +124,8 @@ function mockPrices({
   price = 0.00000012,
   marketCap = 1234567,
   geckoPrice = undefined as string | null | undefined,
+  changes = { h1: 1, h24: 2, d7: 3 } as MockChange | null,
+  changeStatus = 200,
 }: {
   delay?: number;
   status?: number;
@@ -127,6 +133,8 @@ function mockPrices({
   price?: number;
   marketCap?: number;
   geckoPrice?: string | null;
+  changes?: MockChange | null;
+  changeStatus?: number;
 } = {}) {
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
@@ -134,6 +142,20 @@ function mockPrices({
     if (url.hostname === "coins.llama.fi") {
       if (status !== 200)
         return new Response("Upstream error", { status, headers: { "Retry-After": "120" } });
+      if (url.pathname.startsWith("/percentage/")) {
+        if (changeStatus !== 200) return new Response("Upstream error", { status: changeStatus });
+        const ids = decodeURIComponent(url.pathname.split("/percentage/")[1] ?? "").split(",");
+        const period = url.searchParams.get("period");
+        const field = period === "1h" ? "h1" : period === "24h" ? "h24" : "d7";
+        const percent = changes?.[field] ?? null;
+        return Response.json({
+          coins: Object.fromEntries(
+            percent === null
+              ? []
+              : ids.filter(Boolean).map((id) => [id, percent] as [string, number]),
+          ),
+        });
+      }
       const ids = decodeURIComponent(url.pathname.split("/prices/current/")[1] ?? "").split(",");
       const timestamp = Math.floor((Date.now() - age) / 1000);
       return Response.json({
@@ -169,11 +191,19 @@ function mockPrices({
   });
 }
 
-// Providers make several calls per refresh, so assertions count the primary price source.
+// Providers make several calls per refresh. DefiLlama serves prices and percent changes from
+// the same host, so assertions distinguish the price endpoint from the percentage calls.
+function llamaRequests(upstream: { mock: { calls: unknown[][] } }, pathPart: string) {
+  return upstream.mock.calls.filter(([input]) => {
+    const url = new URL(String(input));
+    return url.hostname === "coins.llama.fi" && url.pathname.startsWith(pathPart);
+  }).length;
+}
 function llamaCalls(upstream: { mock: { calls: unknown[][] } }) {
-  return upstream.mock.calls.filter(
-    ([input]) => new URL(String(input)).hostname === "coins.llama.fi",
-  ).length;
+  return llamaRequests(upstream, "/prices/current/");
+}
+function llamaChangeCalls(upstream: { mock: { calls: unknown[][] } }) {
+  return llamaRequests(upstream, "/percentage/");
 }
 
 beforeEach(async () => {
@@ -264,12 +294,14 @@ describe("bulk prices and global refresh coordination", () => {
     expect(data.prices[0]?.priceUsd).toBe("0.00000012");
     const joined = await responses[2]!.json<{ prices: { status: string }[] }>();
     expect(joined.prices.every((price) => price.status === "ok")).toBe(true);
-    // One shared refresh: one DefiLlama price call plus one GeckoTerminal cap call per chain.
-    const llamaCalls = upstream.mock.calls.filter(
-      ([input]) => new URL(String(input)).hostname === "coins.llama.fi",
-    );
-    expect(llamaCalls).toHaveLength(1);
-    const url = new URL(String(llamaCalls[0]![0]));
+    // One shared refresh: one DefiLlama price call and three percentage calls (1h/24h/7d), plus
+    // one GeckoTerminal cap call per chain.
+    const llamaPriceCalls = upstream.mock.calls.filter(([input]) => {
+      const url = new URL(String(input));
+      return url.hostname === "coins.llama.fi" && url.pathname.startsWith("/prices/current/");
+    });
+    expect(llamaPriceCalls).toHaveLength(1);
+    const url = new URL(String(llamaPriceCalls[0]![0]));
     expect(
       decodeURIComponent(url.pathname.split("/prices/current/")[1]!).split(",").sort(),
     ).toEqual([
@@ -278,14 +310,15 @@ describe("bulk prices and global refresh coordination", () => {
       "ethereum:0x0000000000000000000000000000000000000002",
     ]);
     // Keyless: no provider key header is sent, but a descriptive User-Agent is.
-    const headers = llamaCalls[0]![1]?.headers as Record<string, string>;
+    const headers = llamaPriceCalls[0]![1]?.headers as Record<string, string>;
     expect(headers).not.toHaveProperty("x-cg-demo-api-key");
     expect(headers["user-agent"]).toContain("stupid-tokens");
+    // Each change window is fetched once and shared across the concurrent callers.
+    expect(llamaChangeCalls(upstream)).toBe(3);
     const cached = await prices({ tokens });
     expect(cached.status).toBe(200);
-    expect(
-      upstream.mock.calls.filter(([input]) => new URL(String(input)).hostname === "coins.llama.fi"),
-    ).toHaveLength(1);
+    expect(llamaCalls(upstream)).toBe(1);
+    expect(llamaChangeCalls(upstream)).toBe(3);
     expect(
       (
         await env.DB.prepare("SELECT market_cap_usd FROM assets WHERE id = ?")
@@ -397,10 +430,17 @@ describe("bulk prices and global refresh coordination", () => {
       ],
     });
     const data = await response.json<{
-      prices: { status: string; priceUsd: string | null; marketCapUsd: string | null }[];
+      prices: {
+        status: string;
+        priceUsd: string | null;
+        marketCapUsd: string | null;
+        priceChange: { h1: string | null; h24: string | null; d7: string | null };
+      }[];
     }>();
     expect(data.prices.map((price) => price.status)).toEqual(["stale", "not_found"]);
     expect(data.prices.every((price) => price.priceUsd === null)).toBe(true);
+    // Changes ride with the price, so a stale or unknown token reports none.
+    expect(data.prices.every((price) => price.priceChange.d7 === null)).toBe(true);
     // A stale source price yields no price, but the per-deployment cap still refreshes.
     expect(data.prices[0]?.marketCapUsd).toBe("1234567");
     expect(
@@ -419,6 +459,61 @@ describe("bulk prices and global refresh coordination", () => {
     // DefiLlama's timestamp is beyond the freshness limit, so the fresh DEX price is used.
     expect(data.prices[0]?.status).toBe("ok");
     expect(data.prices[0]?.priceUsd).toBe("0.5");
+    expect(llamaCalls(upstream)).toBe(1);
+  });
+
+  it("serves and stores 1h/24h/7d percent changes from the primary source", async () => {
+    await seed();
+    const upstream = mockPrices({ changes: { h1: 1, h24: 2.5, d7: -3 } });
+    const response = await prices({ tokens: [{ chainId: 1, address: address({ n: 1 }) }] });
+    const data = await response.json<{
+      prices: {
+        status: string;
+        priceChange: { h1: string | null; h24: string | null; d7: string | null };
+      }[];
+    }>();
+    expect(data.prices[0]?.status).toBe("ok");
+    // The source reports percentages directly.
+    expect(data.prices[0]?.priceChange).toEqual({ h1: "1", h24: "2.5", d7: "-3" });
+    // One request per window, regardless of how many tokens are in the batch.
+    expect(llamaChangeCalls(upstream)).toBe(3);
+    const stored = await env.DB.prepare(
+      "SELECT change_1h, change_24h, change_7d, changes_updated_at FROM assets WHERE id = ?",
+    )
+      .bind("1:0x0000000000000000000000000000000000000001")
+      .first<{
+        change_1h: number;
+        change_24h: number;
+        change_7d: number;
+        changes_updated_at: number | null;
+      }>();
+    expect(stored?.change_1h).toBe(1);
+    expect(stored?.change_24h).toBe(2.5);
+    expect(stored?.change_7d).toBe(-3);
+    expect(stored?.changes_updated_at).not.toBeNull();
+  });
+
+  it("keeps the price and previously stored changes when the percentage endpoint fails", async () => {
+    const id = "1:0x0000000000000000000000000000000000000001";
+    await seed();
+    // Prime a stored change set, then let the secondary source fail on the next refresh.
+    await env.DB.prepare(
+      "UPDATE assets SET change_1h = 1, change_24h = 2, change_7d = 3, changes_updated_at = ? WHERE id = ?",
+    )
+      .bind(Date.now(), id)
+      .run();
+    const upstream = mockPrices({ changeStatus: 500 });
+    const response = await prices({ tokens: [{ chainId: 1, address: address({ n: 1 }) }] });
+    const data = await response.json<{
+      prices: { status: string; priceUsd: string | null; priceChange: { d7: string | null } }[];
+    }>();
+    // A price source that fails only on changes must not discard its price.
+    expect(data.prices[0]?.status).toBe("ok");
+    expect(data.prices[0]?.priceUsd).toBe("0.00000012");
+    // Failed attempts do not clear previously stored changes.
+    expect(data.prices[0]?.priceChange.d7).toBe("3");
+    // The secondary source is retried once per window before the refresh gives up on it.
+    expect(llamaChangeCalls(upstream)).toBe(6);
     expect(llamaCalls(upstream)).toBe(1);
   });
 

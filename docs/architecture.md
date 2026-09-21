@@ -2,17 +2,19 @@
 
 ## Product contract
 
-Public, keyless EVM token metadata, name/symbol/address search ordered by market cap, and USD bulk pricing. A request accepts up to 50 mixed-chain tokens. Native currencies use `native` as the address. Unknown tokens and unavailable prices have explicit per-item statuses.
+Public, keyless EVM token metadata, name/symbol/address search ordered by market cap, and USD bulk pricing with 1h, 24h, and 7d percent price changes. A request accepts up to 50 mixed-chain tokens. Native currencies use `native` as the address. Unknown tokens and unavailable prices have explicit per-item statuses.
 
 Token lists provide deployment metadata, including decimals and nullable images. Prices and market caps come from address-keyed providers, so identity is always `chainId + address` and no provider coin-ID mapping is required.
 
 Price and market-cap sources are tried in order and merged per field:
 
-1. **DefiLlama** (`coins.llama.fi`) is the primary price source. It accepts large batches, returns a source `timestamp` and a `confidence`, and supports native currencies through the zero address. It does not provide market caps.
+1. **DefiLlama** (`coins.llama.fi`) is the primary price source. It accepts large batches, returns a source `timestamp` and a `confidence`, and supports native currencies through the zero address. It does not provide market caps. Its `percentage` endpoint supplies 1h, 24h, and 7d price changes for the same address-keyed coins. It accepts one period per request and returns a percentage directly, so a fully covered batch costs three extra requests.
 2. **GeckoTerminal** (`api.geckoterminal.com`) supplies per-deployment market caps and images, and acts as a price fallback. It is queried per network with up to 30 addresses and reports pool liquidity.
 3. **DexScreener** (`api.dexscreener.com`) is the long-tail fallback, queried through the chain-scoped `/tokens/v1/{chain}/{addresses}` endpoint. Its unscoped endpoint ignores the chain, so it must not be used. A token can have many pairs, so only the deepest-liquidity pair is considered.
 
 DEX-derived prices are trivially manipulable in thin pools, so GeckoTerminal and DexScreener values are only accepted when pool liquidity meets a minimum. DefiLlama prices are aggregated and additionally require a minimum reported confidence. Market cap is per deployment rather than one global value shared across chains, which matches the chain-specific token list.
+
+Price changes come from DefiLlama's aggregation, so they describe the token's USD price over each window rather than a single pool. They are stored as percentages with a fetch timestamp, because the percentage endpoint carries no source timestamp, and they are withheld from a response whenever the price is stale or unavailable. A failing change request never fails the primary price, and a total change failure leaves previously stored values untouched. GeckoTerminal and DexScreener supply no changes, so a token that only the DEX fallbacks price has none.
 
 Provider chain slugs are derived from the CoinGecko platform ID with a small alias table, and GeckoTerminal network slugs are discovered from its `/networks` endpoint because they differ (`eth` versus `ethereum`). CoinGecko remains in use only for the chain list and public token lists; the large `/coins/list` mapping call is no longer needed.
 
@@ -46,6 +48,6 @@ Other HTTP, validation, and import failures are recorded per chain; successful c
 
 Bulk limits, shared 300-second reservations, provider-level request budgets, short-lived shared edge caches, and change-only catalog upserts bound work. Public requests cannot start metadata imports or market-cap seeding. Unknown tokens never trigger upstream lookups. A provider that reports throttling is dropped for the remainder of the run instead of being re-probed on every batch, so a single throttled source cannot consume the run's budget; the next run retries it.
 
-None of the price sources require an API key. DefiLlama accepts large batches; GeckoTerminal and DexScreener accept 30 addresses per request, so one 100-token bulk request costs a small, fixed number of upstream calls per refresh. Keyless sources share low, contended rate pools, so the default request budget is deliberately conservative and the nightly job refreshes only metadata that is due rather than polling continuously.
+None of the price sources require an API key. DefiLlama accepts large batches; GeckoTerminal and DexScreener accept 30 addresses per request, so one 50-token bulk request costs a small, fixed number of upstream calls per refresh: one DefiLlama price call, three DefiLlama percentage calls (one per change window), and one GeckoTerminal or DexScreener call per 30-address chunk. Keyless sources share low, contended rate pools, so the default request budget is deliberately conservative and the nightly job refreshes only metadata that is due rather than polling continuously.
 
 Upstream data access and public data redistribution are separate concerns; production operation requires appropriate upstream terms.

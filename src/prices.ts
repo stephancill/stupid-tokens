@@ -168,7 +168,7 @@ export class PriceCoordinator extends DurableObject<Env> {
         price_status: "rate_limited",
         refresh_after: Math.min(blockedUntil, now + 60_000),
       }));
-      await writeQuotes({ db: this.env.DB, quotes: blocked, updateMarketCap: false });
+      await writeQuotes({ db: this.env.DB, quotes: blocked, writeSourceValues: false });
       return [...ready, ...blocked];
     }
 
@@ -189,10 +189,10 @@ export class PriceCoordinator extends DurableObject<Env> {
     }
     // Persist reservations before external I/O. D1 exposes the cooldown to all edge readers.
     await this.ctx.storage.sync();
-    await writeQuotes({ db: this.env.DB, quotes: reserved, updateMarketCap: false });
+    await writeQuotes({ db: this.env.DB, quotes: reserved, writeSourceValues: false });
 
     let quotes: QuoteRow[];
-    let updateMarketCap = false;
+    let writeSourceValues = false;
     try {
       // Identity is chainId:address, so sources are queried by chain and address directly.
       const tokens = reserved.map((row) => {
@@ -224,6 +224,8 @@ export class PriceCoordinator extends DurableObject<Env> {
           value?.marketCapUsd !== null &&
           value?.marketCapUsd !== undefined &&
           (value.marketCapUpdatedAt ?? 0) >= (row.market_cap_updated_at ?? 0);
+        const changesAt = value?.changesUpdatedAt ?? null;
+        const newerChanges = changesAt !== null && changesAt >= (row.changes_updated_at ?? 0);
         return {
           ...row,
           price_usd: valid ? value!.priceUsd : null,
@@ -234,9 +236,13 @@ export class PriceCoordinator extends DurableObject<Env> {
           market_cap_updated_at: newerCap
             ? (value!.marketCapUpdatedAt ?? fetchedAt)
             : row.market_cap_updated_at,
+          change_1h: newerChanges ? (value!.changes?.h1 ?? null) : row.change_1h,
+          change_24h: newerChanges ? (value!.changes?.h24 ?? null) : row.change_24h,
+          change_7d: newerChanges ? (value!.changes?.d7 ?? null) : row.change_7d,
+          changes_updated_at: newerChanges ? changesAt : row.changes_updated_at,
         };
       });
-      updateMarketCap = true;
+      writeSourceValues = true;
     } catch (error) {
       console.error("price_refresh_failed", {
         assets: reserved.length,
@@ -256,7 +262,7 @@ export class PriceCoordinator extends DurableObject<Env> {
         price_status: throttled ? "rate_limited" : "upstream_error",
       }));
     }
-    await writeQuotes({ db: this.env.DB, quotes, updateMarketCap });
+    await writeQuotes({ db: this.env.DB, quotes, writeSourceValues });
     return [...ready, ...quotes];
   }
 }

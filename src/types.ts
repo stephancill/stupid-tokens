@@ -40,6 +40,12 @@ export type QuoteRow = {
   price_updated_at: number | null;
   market_cap_usd: number | null;
   market_cap_updated_at: number | null;
+  // Percent price changes (1.5 means 1.5%), not ratios. `changes_updated_at` records when the
+  // primary source supplied them because the percentage endpoint has no source timestamp.
+  change_1h: number | null;
+  change_24h: number | null;
+  change_7d: number | null;
+  changes_updated_at: number | null;
   fetched_at: number | null;
   last_attempt_at: number | null;
   refresh_after: number;
@@ -94,11 +100,19 @@ export function priceResponse({
   const stale =
     quote?.price_status === "ok" &&
     (quote.price_updated_at === null || now - quote.price_updated_at > REFRESH_MS);
+  const ok = !stale && quote?.price_status === "ok";
   return {
     ...token,
     status: stale ? "stale" : (quote?.price_status ?? "price_unavailable"),
-    priceUsd: !stale && quote?.price_status === "ok" ? quote.price_usd : null,
+    priceUsd: ok ? quote!.price_usd : null,
     priceUpdatedAt: iso({ time: quote?.price_updated_at ?? null }),
+    // Changes are derived from the same source data as the price, so they are withheld with it
+    // whenever the price is stale or unavailable.
+    priceChange: {
+      h1: ok ? decimal({ value: quote?.change_1h ?? null }) : null,
+      h24: ok ? decimal({ value: quote?.change_24h ?? null }) : null,
+      d7: ok ? decimal({ value: quote?.change_7d ?? null }) : null,
+    },
     marketCapUsd: decimal({ value: quote?.market_cap_usd ?? null }),
     marketCapUpdatedAt: iso({ time: quote?.market_cap_updated_at ?? null }),
     fetchedAt: iso({ time: quote?.fetched_at ?? null }),

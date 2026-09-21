@@ -8,11 +8,16 @@ import { REFRESH_MS } from "./types";
 // supplies market caps and images; DexScreener is the long-tail fallback.
 export type ProviderName = "defillama" | "geckoterminal" | "dexscreener";
 
+// Percent price changes (1.5 means 1.5%). Only DefiLlama supplies these today.
+export type PriceChange = { h1: number | null; h24: number | null; d7: number | null };
+
 export type ProviderQuote = {
   priceUsd: string | null;
   priceUpdatedAt: number | null;
   marketCapUsd: number | null;
   marketCapUpdatedAt: number | null;
+  changes: PriceChange | null;
+  changesUpdatedAt: number | null;
   imageUrl: string | null;
   source: ProviderName;
 };
@@ -142,6 +147,20 @@ const defillamaSchema = z.object({
   ),
 });
 
+// The percentage endpoint already returns a percentage (3.31 means +3.31%) and accepts one
+// period per request.
+const defillamaPercentageSchema = z.object({
+  coins: z.record(z.string(), z.number().finite()),
+});
+
+const DEFILLAMA_CHANGE_PERIODS = [
+  { field: "h1", period: "1h" },
+  { field: "h24", period: "24h" },
+  { field: "d7", period: "7d" },
+] as const satisfies readonly { field: keyof PriceChange; period: string }[];
+
+const EMPTY_CHANGE: PriceChange = { h1: null, h24: null, d7: null };
+
 const geckoTerminalSchema = z.object({
   data: z.array(
     z.object({
@@ -203,6 +222,8 @@ export async function defillamaQuotes({
         attempts: 2,
       }),
     );
+    const changes = await defillamaChanges({ ids: usable });
+    const changesUpdatedAt = changes ? Date.now() : null;
     for (const [index, token] of batch.entries()) {
       const id = ids[index];
       const coin = id ? data.coins[id] : undefined;
@@ -214,12 +235,51 @@ export async function defillamaQuotes({
         priceUpdatedAt: coin.timestamp ? coin.timestamp * 1000 : null,
         marketCapUsd: null,
         marketCapUpdatedAt: null,
+        changes: changes ? (changes.get(id ?? "") ?? EMPTY_CHANGE) : null,
+        changesUpdatedAt,
         imageUrl: null,
         source: "defillama",
       });
     }
   }
   return results;
+}
+
+// Price changes are secondary to prices: one failing period must not fail the primary source or
+// discard its price, so each period is isolated and only a total failure withholds changes.
+// `null` (rather than an all-null map) signals that no period was fetched, so a transient
+// failure does not clear previously stored changes.
+async function defillamaChanges({
+  ids,
+}: {
+  ids: string[];
+}): Promise<Map<string, PriceChange> | null> {
+  const values = new Map<string, PriceChange>();
+  let succeeded = false;
+  for (const { field, period } of DEFILLAMA_CHANGE_PERIODS) {
+    try {
+      const data = defillamaPercentageSchema.parse(
+        await fetchJson({
+          url: `https://coins.llama.fi/percentage/${ids.join(",")}?period=${period}`,
+          timeoutMs: 10_000,
+          attempts: 2,
+        }),
+      );
+      succeeded = true;
+      for (const id of ids) {
+        const percent = data.coins[id];
+        const change = values.get(id) ?? { ...EMPTY_CHANGE };
+        change[field] = typeof percent === "number" ? percent : null;
+        values.set(id, change);
+      }
+    } catch (error) {
+      console.error("price_change_source_failed", {
+        period,
+        message: error instanceof Error ? error.message : "Unknown upstream failure",
+      });
+    }
+  }
+  return succeeded ? values : null;
 }
 
 export async function geckoTerminalQuotes({
@@ -264,6 +324,8 @@ export async function geckoTerminalQuotes({
           priceUpdatedAt: Date.now(),
           marketCapUsd: marketCap,
           marketCapUpdatedAt: Date.now(),
+          changes: null,
+          changesUpdatedAt: null,
           imageUrl: normalizeImageUrl({ url: attributes.image_url ?? null }),
           source: "geckoterminal",
         });
@@ -318,6 +380,8 @@ export async function dexscreenerQuotes({
           priceUpdatedAt: Date.now(),
           marketCapUsd: pair.marketCap ?? pair.fdv ?? null,
           marketCapUpdatedAt: Date.now(),
+          changes: null,
+          changesUpdatedAt: null,
           imageUrl: null,
           source: "dexscreener",
         });
@@ -405,11 +469,14 @@ export function mergeQuotes({
     const priced = candidates.filter((quote) => quote.priceUsd !== null);
     const chosen = priced.find(isFresh) ?? priced[0] ?? candidates[0]!;
     const cap = candidates.find((quote) => quote.marketCapUsd !== null);
+    const changed = candidates.find((quote) => quote.changes !== null);
     merged.set(id, {
       priceUsd: chosen.priceUsd,
       priceUpdatedAt: chosen.priceUsd ? chosen.priceUpdatedAt : null,
       marketCapUsd: cap?.marketCapUsd ?? null,
       marketCapUpdatedAt: cap?.marketCapUpdatedAt ?? null,
+      changes: changed?.changes ?? null,
+      changesUpdatedAt: changed?.changesUpdatedAt ?? null,
       imageUrl: candidates.find((quote) => quote.imageUrl !== null)?.imageUrl ?? null,
       source: chosen.source,
     });

@@ -2,7 +2,7 @@
 
 The landing page at `https://tokens.stupidtech.net` documents this API. `GET /v1` returns a machine-readable index. The site is served from `public/` through the Worker's assets binding; API routes take precedence over static files.
 
-The public API requires no key and supports CORS. Prices and market caps are USD. Monetary values are decimal strings or `null`. Times are ISO 8601 UTC strings.
+The public API requires no key and supports CORS. Prices and market caps are USD. Price changes are percentages (a 1.5 value means +1.5%). Monetary values are decimal strings or `null`. Times are ISO 8601 UTC strings.
 
 Token identity is `{ chainId, address }`. EVM addresses are case-insensitive and normalized to lowercase. Native currencies use the literal address `native`. A source asset can have several chain deployments; its price and global market cap are shared.
 
@@ -76,6 +76,7 @@ Responses are sent with `Cache-Control: public, max-age=N`, where `N` is the sho
       "status": "ok",
       "priceUsd": "2500.12",
       "priceUpdatedAt": "2026-09-20T12:00:00.000Z",
+      "priceChange": { "h1": "0.42", "h24": "-1.35", "d7": "6.08" },
       "marketCapUsd": "300000000000",
       "marketCapUpdatedAt": "2026-09-20T12:00:00.000Z",
       "fetchedAt": "2026-09-20T12:00:10.000Z",
@@ -84,6 +85,8 @@ Responses are sent with `Cache-Control: public, max-age=N`, where `N` is the sho
   ]
 }
 ```
+
+`priceChange` contains percent changes over the last hour (`h1`), day (`h24`), and week (`d7`), or `null` when the source has no value for that window. The changes come from DefiLlama's aggregation, so they describe the token's USD price rather than a single pool. They are derived from the same source data as the price, so they are `null` whenever the entry is not `ok` (stale, unavailable, or failed), and they are absent entirely for tokens that only the DEX fallback sources price.
 
 The response has one entry per canonical token, in canonical order. A valid batch receives HTTP 200 even when individual items are unavailable:
 

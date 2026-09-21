@@ -23,7 +23,7 @@
 
 - Deployed as the `stupid-tokens` Worker on the custom domain `tokens.stupidtech.net`, backed by the `stupid-tokens` D1 database (`75a5c131-46ba-40e3-b126-1e663e220c1a`, WEUR). `wrangler.jsonc` contains the real account ID, database ID, and custom-domain route, so `bun run deploy` works from a checked-out copy.
 - `workers_dev` is disabled, so the Worker is reachable only via the custom domain.
-- All four migrations (0001-0004) are applied remotely. `ADMIN_TOKEN` is set as a Worker secret and stored only in the ignored `.env.local` locally. No CoinGecko key is configured; the deployment runs keyless.
+- All migrations (0001–0006) are applied remotely. `ADMIN_TOKEN` is set as a Worker secret and stored only in the ignored `.env.local` locally. No CoinGecko key is configured; the deployment runs keyless.
 - Runtime secrets are independent of deployments, so deploying from CI does not clear them.
 - The public GitHub repository is `stephancill/stupid-tokens`.
 - The repository is connected to the Worker through Workers Builds: production branch `main`, build command `bun install`, deploy command `bunx wrangler deploy`, non-production branch builds disabled. The non-production command remains the default `npx wrangler versions upload`, and preview URLs would not be generated anyway because the Worker uses Durable Objects. Pushes to `main` therefore deploy automatically.
@@ -180,3 +180,14 @@
 - Removed the now-unused `bodyLimit` middleware and the 32 KiB body limit, since no public endpoint accepts a request body. Also removed the `415` content-type check and the `413` body-too-large response.
 - Because the only request is canonical, the response has one entry per canonical token in canonical order; the previous "one entry per input, including duplicates" behaviour only existed for the body form.
 - Updated the `GET /v1` endpoint index, the landing page, `docs/api.md`, and `docs/architecture.md`, and refactored the bulk-price tests onto the GET form.
+
+## Price changes (1h, 24h, 7d)
+
+- Added percent price changes over 1h, 24h, and 7d to bulk price responses as `priceChange: { h1, h24, d7 }`, each a percentage string or `null`. The value is a percentage (`1.5` means +1.5%), not a ratio.
+- The source is DefiLlama's address-keyed `percentage` endpoint, already on the primary provider, so no new upstream or identity mapping was introduced. It accepts one period per request and returns a percentage directly, so a fully covered refresh batch costs three additional requests (1h, 24h, 7d). Each period is isolated: a failing period is logged and skipped, and only a total failure marks the changes unavailable, so a secondary failure can never discard the primary price.
+- Added `migrations/0006_asset_price_changes.sql` with `change_1h`, `change_24h`, `change_7d`, and `changes_updated_at`. The percentage endpoint carries no source timestamp, so the fetch time is stored and change writes are guarded by it, mirroring the market-cap guard. A failed or partial change fetch leaves previously stored changes untouched rather than clearing them.
+- Changes are merged independently of the price source and are withheld from a response whenever the entry is not `ok`, so a stale, unavailable, or failed price never reports changes. GeckoTerminal and DexScreener supply no changes, so a token priced only by a DEX fallback has none.
+- Renamed the `writeQuotes` flag from `updateMarketCap` to `writeSourceValues`, since it now guards both market caps and price changes.
+- Added runtime tests: changes are served and stored with one request per window; a failed percentage endpoint keeps the price and previously stored changes; and a stale or unknown token reports null changes. Updated the DefiLlama call-counting helpers to separate the price endpoint from the percentage calls.
+- Updated the landing page, `docs/api.md`, and `docs/architecture.md`.
+- Migration 0006 was applied remotely (`wrangler d1 migrations apply --remote`) before deploying the Worker, and the live `/v1/prices` response was verified to include sane changes (native ETH roughly +3.2% over 24h and +5.5% over 7d; USDC near flat). Migrations are not run by the Workers Builds deploy, so schema changes must always be applied before the code that reads them goes live.

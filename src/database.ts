@@ -4,6 +4,7 @@ const tokenColumns = `t.chain_id, t.address, t.asset_id, t.name, t.symbol, t.dec
   COALESCE(t.image_url, a.image_url) AS image_url, t.metadata_updated_at,
   a.market_cap_usd, a.market_cap_updated_at`;
 const quoteColumns = `id, price_usd, price_updated_at, market_cap_usd, market_cap_updated_at,
+  change_1h, change_24h, change_7d, changes_updated_at,
   fetched_at, last_attempt_at, refresh_after, price_status`;
 
 export async function getTokens({ db, tokens }: { db: D1Database; tokens: TokenId[] }) {
@@ -84,11 +85,11 @@ export async function getQuotes({ db, ids }: { db: D1Database; ids: string[] }) 
 export async function writeQuotes({
   db,
   quotes,
-  updateMarketCap,
+  writeSourceValues,
 }: {
   db: D1Database;
   quotes: QuoteRow[];
-  updateMarketCap: boolean;
+  writeSourceValues: boolean;
 }) {
   if (!quotes.length) return;
   await db
@@ -100,13 +101,25 @@ export async function writeQuotes({
     refresh_after = json_extract(q.value, '$.refresh_after'),
     price_status = json_extract(q.value, '$.price_status')
     ${
-      updateMarketCap
+      writeSourceValues
         ? `, market_cap_usd = CASE
           WHEN COALESCE(json_extract(q.value, '$.market_cap_updated_at'), 0) >= COALESCE(assets.market_cap_updated_at, 0)
           THEN json_extract(q.value, '$.market_cap_usd') ELSE assets.market_cap_usd END,
        market_cap_updated_at = CASE
           WHEN COALESCE(json_extract(q.value, '$.market_cap_updated_at'), 0) >= COALESCE(assets.market_cap_updated_at, 0)
-          THEN json_extract(q.value, '$.market_cap_updated_at') ELSE assets.market_cap_updated_at END`
+          THEN json_extract(q.value, '$.market_cap_updated_at') ELSE assets.market_cap_updated_at END,
+       change_1h = CASE
+          WHEN COALESCE(json_extract(q.value, '$.changes_updated_at'), 0) >= COALESCE(assets.changes_updated_at, 0)
+          THEN json_extract(q.value, '$.change_1h') ELSE assets.change_1h END,
+       change_24h = CASE
+          WHEN COALESCE(json_extract(q.value, '$.changes_updated_at'), 0) >= COALESCE(assets.changes_updated_at, 0)
+          THEN json_extract(q.value, '$.change_24h') ELSE assets.change_24h END,
+       change_7d = CASE
+          WHEN COALESCE(json_extract(q.value, '$.changes_updated_at'), 0) >= COALESCE(assets.changes_updated_at, 0)
+          THEN json_extract(q.value, '$.change_7d') ELSE assets.change_7d END,
+       changes_updated_at = CASE
+          WHEN COALESCE(json_extract(q.value, '$.changes_updated_at'), 0) >= COALESCE(assets.changes_updated_at, 0)
+          THEN json_extract(q.value, '$.changes_updated_at') ELSE assets.changes_updated_at END`
         : ""
     }
     FROM json_each(?) q WHERE assets.id = json_extract(q.value, '$.id')`)

@@ -169,6 +169,7 @@
       "status": "ok",
       "priceUsd": "2629.256297515841",
       "priceUpdatedAt": "2026-09-20T18:53:00.000Z",
+      "priceChange": { "h1": "0.42", "h24": "-1.35", "d7": "6.08" },
       "marketCapUsd": null,
       "marketCapUpdatedAt": null,
       "fetchedAt": "2026-09-20T18:53:02.000Z",
@@ -176,6 +177,12 @@
     }
   ]
 }</code></pre>
+    <p>
+      <code>priceChange</code> holds percent changes over the last hour (<code>h1</code>), day
+      (<code>h24</code>), and week (<code>d7</code>), or <code>null</code> for a window with no
+      value. Changes are derived from the same source data as the price, so they are withheld
+      whenever the entry is not <code>ok</code>.
+    </p>
     <table>
       <tr>
         <th>Status</th>
@@ -215,10 +222,10 @@
       unlisted tokens return <code>not_found</code>.
     </p>
     <p>
-      Prices and market caps come from DefiLlama, GeckoTerminal, and DexScreener, merged with
-      preference for the freshest usable source. DEX-derived prices require a minimum pool
-      liquidity. Token metadata and images are sourced from CoinGecko; images use the largest
-      available size (250×250).
+      Prices and percent price changes come from DefiLlama; market caps and images also come from
+      GeckoTerminal and DexScreener, merged with preference for the freshest usable source.
+      DEX-derived prices require a minimum pool liquidity. Token metadata and images are sourced
+      from CoinGecko; images use the largest available size (250×250).
     </p>
 
     <h2>Limits</h2>
