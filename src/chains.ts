@@ -7,14 +7,20 @@ export const CHAIN_REGISTRY_URL = "https://chainid.network/chains.json";
 export function discoverChains({
   platforms,
   registry,
-  nativeImages = new Map(),
 }: {
   platforms: z.infer<typeof platformsSchema>;
   registry: z.infer<typeof chainRegistrySchema>;
-  // Native coin id to coin image, resolved from the platform's `native_coin_id`.
-  nativeImages?: Map<string, string>;
 }) {
   const nativeCurrencies = new Map(registry.map((chain) => [chain.chainId, chain.nativeCurrency]));
+  // CoinGecko platform IDs and coin IDs share a namespace, so a platform whose ID equals a
+  // currency's `native_coin_id` carries that coin's own logo. CoinGecko does not need to be
+  // asked anything extra: the platform list is already fetched, and the shared namespace makes
+  // ETH-native L2s resolve to the Ethereum coin image rather than the L2's chain logo.
+  const platformImages = new Map(
+    platforms.flatMap((platform) =>
+      platform.image?.large ? [[platform.id, platform.image.large] as const] : [],
+    ),
+  );
   const seen = new Set<number>();
   return platforms
     .flatMap((platform) => {
@@ -26,10 +32,10 @@ export function discoverChains({
         throw new Error(`Duplicate platform chain ID: ${platform.chain_identifier}`);
       seen.add(platform.chain_identifier);
       const currency = nativeCurrencies.get(platform.chain_identifier);
-      // The native currency's logo is its own coin image when it resolves. The platform image
-      // is a chain logo, so it is only a fallback for coins the image lookup cannot resolve.
+      // The currency's own coin image wins; the platform's chain image is the fallback for
+      // coins that are not themselves a platform, so a logo is never guessed.
       const nativeImage =
-        (platform.native_coin_id ? nativeImages.get(platform.native_coin_id) : undefined) ??
+        (platform.native_coin_id ? platformImages.get(platform.native_coin_id) : undefined) ??
         platform.image?.large ??
         null;
       return [
