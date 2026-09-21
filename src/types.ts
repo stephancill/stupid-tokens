@@ -90,10 +90,12 @@ export function tokenResponse({ row }: { row: TokenRow }) {
 
 export function priceResponse({
   token,
+  metadata,
   quote,
   now,
 }: {
   token: TokenId;
+  metadata?: TokenRow;
   quote?: QuoteRow;
   now: number;
 }) {
@@ -103,6 +105,12 @@ export function priceResponse({
   const ok = !stale && quote?.price_status === "ok";
   return {
     ...token,
+    // Metadata is included so a caller does not need a second request per token. It is null for
+    // a token that is absent from the catalog.
+    name: metadata?.name ?? null,
+    symbol: metadata?.symbol ?? null,
+    decimals: metadata?.decimals ?? null,
+    imageUrl: metadata?.image_url ?? null,
     status: stale ? "stale" : (quote?.price_status ?? "price_unavailable"),
     priceUsd: ok ? quote!.price_usd : null,
     priceUpdatedAt: iso({ time: quote?.price_updated_at ?? null }),
@@ -115,6 +123,7 @@ export function priceResponse({
     },
     marketCapUsd: decimal({ value: quote?.market_cap_usd ?? null }),
     marketCapUpdatedAt: iso({ time: quote?.market_cap_updated_at ?? null }),
+    metadataUpdatedAt: iso({ time: metadata?.metadata_updated_at ?? null }),
     fetchedAt: iso({ time: quote?.fetched_at ?? null }),
     nextRefreshAt: quote ? iso({ time: quote.refresh_after }) : null,
   };

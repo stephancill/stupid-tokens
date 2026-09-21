@@ -2,7 +2,7 @@
 
 ## Product contract
 
-Public, keyless EVM token metadata, name/symbol/address search ordered by market cap, and USD bulk pricing with 1h, 24h, and 7d percent price changes. A request accepts up to 50 mixed-chain tokens. Native currencies use `native` as the address. Unknown tokens and unavailable prices have explicit per-item statuses.
+Public, keyless EVM token metadata, name/symbol/address search ordered by market cap, and USD bulk pricing with 1h, 24h, and 7d percent price changes. A request accepts up to 50 mixed-chain tokens and returns each token's metadata alongside its price, so callers do not need a separate metadata request. Native currencies use `native` as the address. Unknown tokens and unavailable prices have explicit per-item statuses.
 
 Token lists provide deployment metadata, including decimals and nullable images. Prices and market caps come from address-keyed providers, so identity is always `chainId + address` and no provider coin-ID mapping is required.
 
@@ -26,6 +26,7 @@ Search uses the latest stored market caps, with null values last and chain/addre
 
 - Hono Worker: validation, CORS, public endpoints, bounded edge caching.
 - Bulk prices are served from a canonical `GET` so responses can be cached in front of the Worker. The lifetime is the shortest remaining freshness across the batch, bounded by both the refresh interval and the source timestamp, so a cached response can never outlive the five-minute freshness limit. Non-canonical requests are redirected (`308`) to the canonical URL. There is no `POST` form, because a request body cannot form a cache key.
+- Each price entry carries the deployment's metadata (`name`, `symbol`, `decimals`, `imageUrl`, `metadataUpdatedAt`) in addition to its price, so one bulk request is enough for a wallet to render balances. The metadata comes from the cached identity lookup that already resolves each price, so it costs no additional D1 or upstream work and is `null` only for a `not_found` token.
 - D1: chains, assets, deployment metadata, FTS5 trigram search, quotes, sync state.
 - One SQLite-backed Durable Object: micro-batches cache misses, shares in-flight work, persists per-asset refresh reservations and provider budgets, and writes results back to D1. The object handles refresh traffic; cached price reads use D1 or the edge cache.
 - Daily Cron Trigger: refreshes metadata only. Prices have no polling schedule.

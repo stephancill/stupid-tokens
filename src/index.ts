@@ -230,7 +230,7 @@ async function loadPrices({
   const prices = tokens.map((token) => {
     const row = byToken.get(tokenKey(token));
     const quote = row?.asset_id ? quotes.get(row.asset_id) : undefined;
-    const result = priceResponse({ token, quote, now });
+    const result = priceResponse({ token, metadata: row, quote, now });
     return row ? result : { ...result, status: "not_found" };
   });
   return { prices, ttlSeconds: responseTtl({ prices, now }) };

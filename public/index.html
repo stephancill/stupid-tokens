@@ -158,7 +158,9 @@
     </p>
     <p>
       One result per requested token, in canonical order. A valid batch returns HTTP 200 even when
-      individual tokens are unavailable.
+      individual tokens are unavailable. Each entry includes token metadata (<code>name</code>,
+      <code>symbol</code>, <code>decimals</code>, <code>imageUrl</code>) so a separate metadata
+      request is not needed; these are <code>null</code> for a <code>not_found</code> token.
     </p>
     <pre><code>{
   "currency": "usd",
@@ -166,12 +168,17 @@
     {
       "chainId": 1,
       "address": "native",
+      "name": "Ether",
+      "symbol": "ETH",
+      "decimals": 18,
+      "imageUrl": null,
       "status": "ok",
       "priceUsd": "2629.256297515841",
       "priceUpdatedAt": "2026-09-20T18:53:00.000Z",
       "priceChange": { "h1": "0.42", "h24": "-1.35", "d7": "6.08" },
       "marketCapUsd": null,
       "marketCapUpdatedAt": null,
+      "metadataUpdatedAt": "2026-09-20T18:48:50.540Z",
       "fetchedAt": "2026-09-20T18:53:02.000Z",
       "nextRefreshAt": "2026-09-20T18:58:00.000Z"
     }

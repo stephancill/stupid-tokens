@@ -73,18 +73,25 @@ Responses are sent with `Cache-Control: public, max-age=N`, where `N` is the sho
     {
       "chainId": 1,
       "address": "native",
+      "name": "Ether",
+      "symbol": "ETH",
+      "decimals": 18,
+      "imageUrl": null,
       "status": "ok",
       "priceUsd": "2500.12",
       "priceUpdatedAt": "2026-09-20T12:00:00.000Z",
       "priceChange": { "h1": "0.42", "h24": "-1.35", "d7": "6.08" },
       "marketCapUsd": "300000000000",
       "marketCapUpdatedAt": "2026-09-20T12:00:00.000Z",
+      "metadataUpdatedAt": "2026-09-20T03:00:00.000Z",
       "fetchedAt": "2026-09-20T12:00:10.000Z",
       "nextRefreshAt": "2026-09-20T12:05:09.950Z"
     }
   ]
 }
 ```
+
+Each entry also carries token metadata — `name`, `symbol`, `decimals`, `imageUrl`, and `metadataUpdatedAt` — so callers do not need a separate metadata request per token. These fields are `null` for a `not_found` token. Metadata is read from the same cached identity lookup used to resolve the price, so including it adds no upstream work.
 
 `priceChange` contains percent changes over the last hour (`h1`), day (`h24`), and week (`d7`), or `null` when the source has no value for that window. The changes come from DefiLlama's aggregation, so they describe the token's USD price rather than a single pool. They are derived from the same source data as the price, so they are `null` whenever the entry is not `ok` (stale, unavailable, or failed), and they are absent entirely for tokens that only the DEX fallback sources price.
 

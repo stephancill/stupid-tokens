@@ -191,3 +191,10 @@
 - Added runtime tests: changes are served and stored with one request per window; a failed percentage endpoint keeps the price and previously stored changes; and a stale or unknown token reports null changes. Updated the DefiLlama call-counting helpers to separate the price endpoint from the percentage calls.
 - Updated the landing page, `docs/api.md`, and `docs/architecture.md`.
 - Migration 0006 was applied remotely (`wrangler d1 migrations apply --remote`) before deploying the Worker, and the live `/v1/prices` response was verified to include sane changes (native ETH roughly +3.2% over 24h and +5.5% over 7d; USDC near flat). Migrations are not run by the Workers Builds deploy, so schema changes must always be applied before the code that reads them goes live.
+
+## Token metadata in bulk price responses
+
+- Bulk price entries now include `name`, `symbol`, `decimals`, `imageUrl`, and `metadataUpdatedAt`, so a caller can render a token list without a separate metadata request per token. Fields are `null` for a `not_found` token, keeping the entry shape stable.
+- The data comes from the same cached identity lookup (`getTokens`, namespace `price-identities`) that `loadPrices` already performs to resolve each price, so no additional D1 query, upstream request, or cache namespace was introduced.
+- `priceResponse` gained an optional `metadata` argument; `loadPrices` passes the already-fetched token row. The edge `Cache-Control` calculation is unchanged because metadata only changes on catalog sync.
+- Added a runtime test asserting populated metadata for a known token, null metadata for an unknown token, and that no extra upstream call is made. Updated the landing page and `docs/api.md`/`docs/architecture.md` samples.

@@ -517,6 +517,44 @@ describe("bulk prices and global refresh coordination", () => {
     expect(llamaCalls(upstream)).toBe(1);
   });
 
+  it("includes token metadata alongside prices without extra upstream work", async () => {
+    await seed();
+    const upstream = mockPrices();
+    const response = await prices({
+      tokens: [
+        { chainId: 1, address: address({ n: 2 }) },
+        { chainId: 1, address: address({ n: 999 }) },
+      ],
+    });
+    const data = await response.json<{
+      prices: {
+        name: string | null;
+        symbol: string | null;
+        decimals: number | null;
+        imageUrl: string | null;
+        metadataUpdatedAt: string | null;
+        status: string;
+      }[];
+    }>();
+    expect(data.prices[0]).toMatchObject({
+      name: "Large USDC Token",
+      symbol: "LUSDC",
+      decimals: 18,
+      imageUrl: "https://example.com/token.png",
+    });
+    expect(data.prices[0]?.metadataUpdatedAt).not.toBeNull();
+    // An unknown token keeps the same entry shape, with null metadata.
+    expect(data.prices[1]).toMatchObject({
+      name: null,
+      symbol: null,
+      decimals: null,
+      imageUrl: null,
+      status: "not_found",
+    });
+    // Metadata comes from the same cached identity lookup, so it costs no extra request.
+    expect(llamaCalls(upstream)).toBe(1);
+  });
+
   it("serves a cacheable canonical GET and redirects non-canonical token lists", async () => {
     await seed();
     const upstream = mockPrices();
