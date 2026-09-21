@@ -198,3 +198,9 @@
 - The data comes from the same cached identity lookup (`getTokens`, namespace `price-identities`) that `loadPrices` already performs to resolve each price, so no additional D1 query, upstream request, or cache namespace was introduced.
 - `priceResponse` gained an optional `metadata` argument; `loadPrices` passes the already-fetched token row. The edge `Cache-Control` calculation is unchanged because metadata only changes on catalog sync.
 - Added a runtime test asserting populated metadata for a known token, null metadata for an unknown token, and that no extra upstream call is made. Updated the landing page and `docs/api.md`/`docs/architecture.md` samples.
+
+## Landing page accuracy pass
+
+- Refreshed the landing page against the current implementation: documented `priceChange` and the price-entry metadata fields, added `metadataUpdatedAt` to the bulk-price sample, and noted that a 2-character search query matches prefixes rather than substrings.
+- Corrected the sources copy: DefiLlama is the source of prices and percent price changes, while GeckoTerminal and DexScreener provide liquidity-gated price fallbacks and market caps (GeckoTerminal also fills a missing image). The page previously implied the DEX sources supplied no prices.
+- Updated the page title/Open Graph descriptions to mention price changes and token metadata, and removed the word "keyless" from the descriptions (the copy already states "no API key").
