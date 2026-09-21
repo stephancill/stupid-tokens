@@ -14,7 +14,7 @@ Returns `{ "chains": [...] }` with `chainId`, `name`, `tokenCount`, and `syncedA
 
 Coverage is discovered automatically from CoinGecko's numeric EVM platform IDs and available token lists. This endpoint reports actual imported coverage rather than a fixed allowlist. New chains become available after a successful catalog synchronization.
 
-Native currency metadata is joined by chain ID from the public Chain ID registry. Contract tokens can be supported even when native metadata is not yet available. A known native currency with no CoinGecko asset mapping has metadata but unavailable pricing. Previously imported chains retain their last valid data if a subsequent list download is unavailable or fails; inspect each chain's `syncedAt` for its last successful import.
+Native currency metadata is joined by chain ID from the public Chain ID registry. Native currency logos are resolved from the chain's native coin, with the chain image as a fallback. Contract tokens can be supported even when native metadata is not yet available. A known native currency with no CoinGecko asset mapping has metadata but unavailable pricing. Previously imported chains retain their last valid data if a subsequent list download is unavailable or fails; inspect each chain's `syncedAt` for its last successful import.
 
 ## GET /v1/search
 
@@ -52,7 +52,7 @@ Returns metadata, or HTTP 404 if the deployment is absent from the catalog:
 }
 ```
 
-Values above are illustrative. Image URLs and market caps may be null. CoinGecko-hosted images use the largest available size (250x250) rather than the 25x25 thumbnail embedded in token lists. A source-provided empty symbol is preserved rather than invented. Metadata lookup returns the stored market cap and does not trigger a price refresh.
+Values above are illustrative. Image URLs and market caps may be null. CoinGecko-hosted images use the largest available size (250x250) rather than the 25x25 thumbnail embedded in token lists. Native currencies have no token-list entry, so their `imageUrl` is resolved from the chain's native coin and falls back to the chain image. A source-provided empty symbol is preserved rather than invented. Metadata lookup returns the stored market cap and does not trigger a price refresh.
 
 ## GET /v1/prices
 
@@ -76,7 +76,7 @@ Responses are sent with `Cache-Control: public, max-age=N`, where `N` is the sho
       "name": "Ether",
       "symbol": "ETH",
       "decimals": 18,
-      "imageUrl": null,
+      "imageUrl": "https://coin-images.coingecko.com/coins/images/279/large/ethereum.png",
       "status": "ok",
       "priceUsd": "2500.12",
       "priceUpdatedAt": "2026-09-20T12:00:00.000Z",

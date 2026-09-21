@@ -15,6 +15,7 @@ import type { Env } from "./types";
 import {
   catalogReportSchema,
   chainRegistrySchema,
+  marketsSchema,
   platformsSchema,
   tokenListSchema,
   type TokenListToken,
@@ -190,6 +191,68 @@ async function withImportLock<T>({
   }
 }
 
+const NATIVE_IMAGE_KEY = "native_coin_images";
+const NATIVE_IMAGE_AT = "native_coin_images_at";
+const NATIVE_IMAGE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const NATIVE_IMAGE_BATCH = 200;
+
+// CoinGecko's batched market endpoint returns an image per coin id.
+async function fetchNativeCoinImages({ env, ids }: { env: Env; ids: string[] }) {
+  const images = new Map<string, string>();
+  for (let offset = 0; offset < ids.length; offset += NATIVE_IMAGE_BATCH) {
+    const batch = ids.slice(offset, offset + NATIVE_IMAGE_BATCH);
+    const data = marketsSchema.parse(
+      await apiJson({
+        env,
+        path: "/coins/markets",
+        query: { vs_currency: "usd", per_page: "250", ids: batch.join(",") },
+      }),
+    );
+    for (const coin of data) {
+      if (coin.image) images.set(coin.id, normalizeImageUrl({ url: coin.image })!);
+    }
+  }
+  return images;
+}
+
+// Native currencies have no contract address, so no address-keyed source carries a logo. The
+// platform's `native_coin_id` is resolved to the native coin's own image through one batched
+// CoinGecko call, cached so steady-state syncs make none. A failure retains the cached mapping
+// and never aborts a sync; the platform chain image remains the fallback in `discoverChains`.
+async function loadNativeCoinImages({ env, coinIds }: { env: Env; coinIds: string[] }) {
+  const requested = [...new Set(coinIds.filter(Boolean))];
+  if (!requested.length) return new Map<string, string>();
+  const cachedAt = Number((await stateValue({ db: env.DB, key: NATIVE_IMAGE_AT })) ?? 0);
+  let cached: Record<string, string | null> = {};
+  const stored = await stateValue({ db: env.DB, key: NATIVE_IMAGE_KEY });
+  if (stored) {
+    try {
+      cached = JSON.parse(stored) as Record<string, string | null>;
+    } catch {
+      cached = {};
+    }
+  }
+  // A null value records "attempted, no image" so an unresolvable coin is not re-fetched on
+  // every run. A lapsed cache refreshes every known coin plus any newly discovered ones.
+  const stale = Date.now() - cachedAt >= NATIVE_IMAGE_MAX_AGE_MS;
+  const refresh = stale
+    ? [...new Set([...Object.keys(cached), ...requested])]
+    : requested.filter((id) => !(id in cached));
+  if (refresh.length) {
+    try {
+      const images = await fetchNativeCoinImages({ env, ids: refresh });
+      for (const id of refresh) cached[id] = images.get(id) ?? null;
+      await setState({ db: env.DB, key: NATIVE_IMAGE_KEY, value: JSON.stringify(cached) });
+      await setState({ db: env.DB, key: NATIVE_IMAGE_AT, value: String(Date.now()) });
+    } catch (error) {
+      console.error("native_coin_images_failed", {
+        message: error instanceof Error ? error.message : "Unknown upstream failure",
+      });
+    }
+  }
+  return new Map(requested.flatMap((id) => (cached[id] ? [[id, cached[id]!] as const] : [])));
+}
+
 // GeckoTerminal network slugs are an optional enrichment used for market caps. They are
 // cached because the keyless endpoint throttles, and a failure must never abort a sync.
 async function loadGeckoTerminalNetworks({ env }: { env: Env }) {
@@ -254,7 +317,13 @@ export async function syncCatalog({
           fetchJson({ url: CHAIN_REGISTRY_URL }).then((data) => chainRegistrySchema.parse(data)),
           loadGeckoTerminalNetworks({ env }),
         ]);
-        const chains = discoverChains({ platforms, registry });
+        const nativeImages = await loadNativeCoinImages({
+          env,
+          coinIds: platforms.flatMap((platform) =>
+            platform.native_coin_id ? [platform.native_coin_id] : [],
+          ),
+        });
+        const chains = discoverChains({ platforms, registry, nativeImages });
         if (!chains.length) throw new Error("CoinGecko returned no EVM platforms");
         const imported: { chainId: number; tokens: number; discarded: number }[] = [];
         const skipped: { chainId: number; reason: string }[] = [];
@@ -319,7 +388,6 @@ export async function syncCatalog({
                 address: "native",
                 assetId: `${chain.id}:native`,
                 ...chain.native,
-                imageUrl: null,
               });
             }
             if (!tokens.length) {

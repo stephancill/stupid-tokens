@@ -105,7 +105,10 @@ export const platformsSchema = z.array(
     id: z.string().max(250),
     name: z.string().min(1).max(500),
     chain_identifier: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).nullable(),
+    // The native coin id lets the native currency's own logo be resolved without the large
+    // `/coins/list` mapping. The platform image is a chain logo, used only as a fallback.
     native_coin_id: z.string().nullable(),
+    image: z.object({ large: z.string().url().nullish() }).nullish(),
   }),
 );
 export const chainRegistrySchema = z.array(

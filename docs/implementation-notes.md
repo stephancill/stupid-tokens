@@ -204,3 +204,14 @@
 - Refreshed the landing page against the current implementation: documented `priceChange` and the price-entry metadata fields, added `metadataUpdatedAt` to the bulk-price sample, and noted that a 2-character search query matches prefixes rather than substrings.
 - Corrected the sources copy: DefiLlama is the source of prices and percent price changes, while GeckoTerminal and DexScreener provide liquidity-gated price fallbacks and market caps (GeckoTerminal also fills a missing image). The page previously implied the DEX sources supplied no prices.
 - Updated the page title/Open Graph descriptions to mention price changes and token metadata, and removed the word "keyless" from the descriptions (the copy already states "no API key").
+
+## Native currency logos
+
+- Native rows were inserted with a null `imageUrl`, so a wallet could render a native balance's price but not its logo. No address-keyed source can fill this: token lists contain no native entry (verified against the Ethereum list), both DEX fallbacks skip native, and DefiLlama returns no image.
+- CoinGecko's `/asset_platforms` payload — already fetched on every sync — carries a per-platform `native_coin_id` and a chain `image`. The platform schema parsed `native_coin_id` and discarded it, and dropped `image` entirely.
+- Added native logo resolution. Distinct `native_coin_id` values are resolved to each coin's own image through one batched `/coins/markets` call, cached in `app_state` for seven days. Unresolvable coins and platforms without a coin ID fall back to the platform chain image. Because the native coin image is used rather than the chain logo, ETH-native L2s (Arbitrum, Base, Optimism) show ETH's logo rather than the chain's logomark.
+- No migration was needed; the mapping lives in `app_state`. Nothing is hardcoded, and identity stays `chainId + native`.
+- Failure isolation matches the GeckoTerminal network lookup: a failed call is logged, retains any cached mapping, and never aborts a sync. An attempted coin that returns no image is recorded as null so it is not re-fetched on every run, while a first-time failure (no timestamp written) is retried on the next sync.
+- Verified live against CoinGecko: 275 EVM platforms, 271 with a `native_coin_id`, 217 distinct coin ids resolved in a single ~2.3 KB request, 183 of which returned an image; the remainder use the chain image.
+- Added runtime tests covering the native coin image winning over the chain image, the chain-image fallback when a coin resolves nothing, thumbnail-to-large normalization, a null platform image staying null, the seven-day cache suppressing a repeat lookup, and a failing lookup completing the sync with the fallback.
+- Updated the landing page, `docs/api.md`, and `docs/architecture.md`.

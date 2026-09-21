@@ -691,6 +691,13 @@ describe("upstream ingestion", () => {
             native_coin_id: "test-native",
           })),
         );
+      if (url.pathname.endsWith("/coins/markets"))
+        return Response.json([
+          {
+            id: "test-native",
+            image: "https://coin-images.coingecko.com/coins/images/1/large/native.png",
+          },
+        ]);
       if (url.hostname === "tokens.coingecko.com") {
         const chain = chains.find((chain) => url.pathname === `/${chain.platform}/all.json`)!;
         return Response.json({

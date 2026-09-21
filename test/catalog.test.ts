@@ -18,6 +18,7 @@ type Platform = {
   name: string;
   chain_identifier: number | null;
   native_coin_id: string | null;
+  image?: { large: string | null } | null;
 };
 const platform = ({
   id,
@@ -48,15 +49,24 @@ function list({ chainId }: { chainId: number }) {
 function upstream({
   platforms,
   nativeChainIds = [],
+  nativeImages = {},
   responses = {},
 }: {
   platforms: Platform[];
   nativeChainIds?: number[];
+  nativeImages?: Record<string, string>;
   responses?: Record<string, () => Response>;
 }) {
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
     if (url.pathname.endsWith("/asset_platforms")) return Response.json(platforms);
+    if (url.hostname === "api.coingecko.com" && url.pathname.endsWith("/coins/markets"))
+      return Response.json(
+        (url.searchParams.get("ids") ?? "")
+          .split(",")
+          .filter(Boolean)
+          .map((id) => ({ id, image: nativeImages[id] ?? null })),
+      );
     if (url.hostname === "api.geckoterminal.com" && url.pathname.endsWith("/networks"))
       return Response.json({
         data: platforms
@@ -288,6 +298,90 @@ it("upgrades CoinGecko thumbnail logos to the large variant without touching oth
   expect(byAddress.get(address({ n: 2 }))).toBe("https://example.com/custom/thumb/logo.png");
 });
 
+it("resolves native currency logos from the platform's native coin, with a chain-image fallback", async () => {
+  const mock = upstream({
+    platforms: [
+      {
+        ...platform({ id: "resolved", chainId: 146, nativeId: "coin-a" }),
+        image: {
+          large: "https://coin-images.coingecko.com/asset_platforms/images/1/large/chain.png",
+        },
+      },
+      {
+        ...platform({ id: "fallback", chainId: 147, nativeId: "coin-b" }),
+        // A thumbnail chain image is upgraded, matching the token-list logo behaviour.
+        image: {
+          large: "https://coin-images.coingecko.com/asset_platforms/images/2/thumb/chain.png",
+        },
+      },
+      platform({ id: "no-coin", chainId: 148, nativeId: null }),
+    ],
+    nativeChainIds: [146, 147, 148],
+    nativeImages: {
+      // A thumbnail coin image is upgraded to the large variant.
+      "coin-a": "https://coin-images.coingecko.com/coins/images/279/thumb/eth.png",
+    },
+  });
+  const report = await syncCatalog({ env });
+  expect(report.status).toBe("complete");
+  const natives = await getTokens({
+    db: env.DB,
+    tokens: [
+      { chainId: 146, address: "native" },
+      { chainId: 147, address: "native" },
+      { chainId: 148, address: "native" },
+    ],
+  });
+  const byChain = new Map(natives.map((token) => [token.chain_id, token.image_url]));
+  // The native coin's own image wins over the chain image.
+  expect(byChain.get(146)).toBe("https://coin-images.coingecko.com/coins/images/279/large/eth.png");
+  // A coin the lookup cannot resolve falls back to the chain image.
+  expect(byChain.get(147)).toBe(
+    "https://coin-images.coingecko.com/asset_platforms/images/2/large/chain.png",
+  );
+  // No coin id and no chain image leaves the logo null rather than guessed.
+  expect(byChain.get(148)).toBeNull();
+  const markets = () =>
+    mock.mock.calls.filter(([url]) => String(url).includes("/coins/markets")).length;
+  // Both coin ids are fetched in one batched request, and the mapping is cached.
+  expect(markets()).toBe(1);
+  await syncCatalog({ env });
+  expect(markets()).toBe(1);
+});
+
+it("keeps the chain-image fallback when the native coin image lookup fails", async () => {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/coins/markets")) return new Response(null, { status: 500 });
+    if (url.pathname.endsWith("/asset_platforms"))
+      return Response.json([
+        {
+          ...platform({ id: "resilient", chainId: 146, nativeId: "coin-a" }),
+          image: {
+            large: "https://coin-images.coingecko.com/asset_platforms/images/1/large/chain.png",
+          },
+        },
+      ]);
+    if (url.hostname === "chainid.network")
+      return Response.json([
+        { chainId: 146, nativeCurrency: { name: "Registry Currency", symbol: "REG", decimals: 8 } },
+      ]);
+    if (url.hostname === "api.geckoterminal.com" && url.pathname.endsWith("/networks"))
+      return Response.json({ data: [] });
+    if (url.hostname === "tokens.coingecko.com") return Response.json(list({ chainId: 146 }));
+    throw new Error(`Unexpected request: ${url}`);
+  });
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  const report = await syncCatalog({ env });
+  // A failed image lookup is non-fatal: the sync completes and the chain image is used.
+  expect(report.status).toBe("complete");
+  const [native] = await getTokens({ db: env.DB, tokens: [{ chainId: 146, address: "native" }] });
+  expect(native?.image_url).toBe(
+    "https://coin-images.coingecko.com/asset_platforms/images/1/large/chain.png",
+  );
+  expect(log).toHaveBeenCalled();
+});
+
 it("sends the provider key header only when a key is configured", async () => {
   const chains = [{ id: 1, name: "Ethereum", platform: "ethereum" }];
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
@@ -309,6 +403,8 @@ it("sends the provider key header only when a key is configured", async () => {
           native_coin_id: "ethereum",
         })),
       );
+    if (url.pathname.endsWith("/coins/markets"))
+      return Response.json([{ id: "ethereum", image: "https://coin-images.coingecko.com/x.png" }]);
     if (url.hostname === "tokens.coingecko.com")
       return Response.json({
         name: "CoinGecko",
